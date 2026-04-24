@@ -1,29 +1,17 @@
-# W.A.S.P. — Nest Configuration File
-# ─────────────────────────────────────────────────────────────────────────────
-# Copy this file to the Nest SD card as /wasp.cfg and fill in your details.
-# The Nest reads this file at boot — no recompile needed.
-#
-# Lines starting with # are comments and are ignored.
-# Keys are case-sensitive. Do not add spaces around the = sign.
-# ─────────────────────────────────────────────────────────────────────────────
+# W.A.S.P. Nest configuration
+# Place on Nest SD card as /wasp.cfg
+# Lines starting with # are comments. No spaces around = signs.
 
-[network]
-# Home WiFi — Nest connects here to upload to WiGLE and WDGWars
-home_ssid=YourHomeWiFiName
-home_pass=YourHomeWiFiPassword
+# Home Wi-Fi — Nest connects here to upload to WiGLE and WDGWars
+homeSsid=YourHomeWiFiName
+homePsk=YourHomeWiFiPassword
 
-[nest]
-# Nest access point — Workers and Drones connect here to sync files
-ap_ssid=WASP-Nest
-ap_pass=waspswarm
+# Nest Access Point — Workers and Drones connect here to sync files
+apSsid=WASP-Nest
+apPsk=waspswarm
 
-[wigle]
-# WiGLE API credentials — found at wigle.net under Account > API Token
-# api_name is your WiGLE username, api_token is the encoded API token
-api_name=YourWiGLEUsername
-api_token=YourWiGLEAPIToken
+# WiGLE 'Encoded for use' token — wigle.net → Account → API Token
+wigleBasicToken=YourWiGLEEncodedToken
 
-[wdgwars]
-# WDGWars API key — wdgwars.pl → Profile → API Keys → Generate
-# Must be a 64-character hex key
-api_key=0000000000000000000000000000000000000000000000000000000000000000
+# WDGWars API key — wdgwars.pl → Profile → API Keys (64 hex chars)
+wdgwarsApiKey=0000000000000000000000000000000000000000000000000000000000000000
