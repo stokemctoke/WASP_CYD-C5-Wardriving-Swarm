@@ -24,6 +24,6 @@ api_name=YourWiGLEUsername
 api_token=YourWiGLEAPIToken
 
 [wdgwars]
-# WDGWars credentials — wdgwars.pl
-username=YourWDGWarsUsername
-password=YourWDGWarsPassword
+# WDGWars API key — wdgwars.pl → Profile → API Keys → Generate
+# Must be a 64-character hex key
+api_key=0000000000000000000000000000000000000000000000000000000000000000
