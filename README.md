@@ -66,7 +66,7 @@ Want more coverage? Add another worker. The nest never changes.
 │  • Receives scan data via ESP-NOW            │
 │  • File browser and log management           │
 │  • Connects to home WiFi for uploads         │
-│  • WiGLE + WDGWars upload                   │
+│  • WiGLE + WDGWars upload                    │
 │  • No wardriving — radio free for comms      │
 └────────────────┬─────────────────────────────┘
                  │  ESP-NOW (heartbeat / data)
