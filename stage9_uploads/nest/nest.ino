@@ -75,12 +75,37 @@
 // ── Packet types ─────────────────────────────────────────────────────────────
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
+#define WASP_FIRMWARE_VER  9
+
+// ── Extended packet header (appended to both packet types) ───────────────────
+// All fields zero-filled by senders that do not yet populate them.
+// Nest never rejects a packet solely because extended fields are zero.
+//
+//  swarmId     — djb2 hash of swarm name; nest filters ESP-NOW on this
+//  loyaltyLevel— 0=wild, 255=fully loyal (drone game mechanic)
+//  gangId      — WDGWars gang affiliation (0=ungrouped)
+//  firmwareVer — sender firmware stage; for cross-swarm compat checks
+//  battLevel   — 0–100 %, 255=unknown
+//  playerLevel — rank / promotion mechanic
+//  boostLevel  — active boost / buff tier
+//  reserved    — zero-filled; reserved for future game fields
+//
+// heartbeat_t  : 8 + 16 = 24 bytes
+// scan_summary_t: 36 + 16 = 52 bytes
 
 typedef struct __attribute__((packed)) {
-  uint8_t type;
-  uint8_t workerMac[6];
-  uint8_t nodeType;   // 0x00 = worker, 0x01 = drone
-} heartbeat_t;
+  uint8_t  type;
+  uint8_t  workerMac[6];
+  uint8_t  nodeType;       // 0x00 = worker, 0x01 = drone
+  uint16_t swarmId;
+  uint8_t  loyaltyLevel;
+  uint8_t  gangId;
+  uint8_t  firmwareVer;
+  uint8_t  battLevel;
+  uint16_t playerLevel;
+  uint8_t  boostLevel;
+  uint8_t  reserved[7];
+} heartbeat_t;             // 24 bytes
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -94,7 +119,15 @@ typedef struct __attribute__((packed)) {
   uint16_t bleCount;
   int8_t   bestRssi;
   uint32_t cycleCount;
-} scan_summary_t;
+  uint16_t swarmId;
+  uint8_t  loyaltyLevel;
+  uint8_t  gangId;
+  uint8_t  firmwareVer;
+  uint8_t  battLevel;
+  uint16_t playerLevel;
+  uint8_t  boostLevel;
+  uint8_t  reserved[7];
+} scan_summary_t;          // 52 bytes
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -222,7 +255,9 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
 
   if (data[0] == WASP_PKT_HEARTBEAT && len >= 7) {
     const heartbeat_t* pkt = (const heartbeat_t*)data;
-    uint8_t nodeType = (len >= (int)sizeof(heartbeat_t)) ? pkt->nodeType : 0;
+    uint8_t nodeType = (len >= 8)                    ? pkt->nodeType : 0;
+    // extended fields present only in stage9+ firmware
+    bool ext         = (len >= (int)sizeof(heartbeat_t));
 
     int idx = findOrAddWorker(pkt->workerMac);
     uint32_t ago = 0;
@@ -245,7 +280,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     return;
   }
 
-  if (data[0] != WASP_PKT_SUMMARY || len < (int)sizeof(scan_summary_t)) return;
+  if (data[0] != WASP_PKT_SUMMARY || len < 36) return;  // 36 = v1 minimum (stage8)
 
   const scan_summary_t* pkt = (const scan_summary_t*)data;
   int idx = findOrAddWorker(pkt->workerMac);

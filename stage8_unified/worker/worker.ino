@@ -49,12 +49,21 @@ static const uint8_t NEST_MAC[6] = {0xA4, 0xF0, 0x0F, 0x5D, 0x96, 0xD4};
 
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
+#define WASP_FIRMWARE_VER  8
 
 typedef struct __attribute__((packed)) {
-  uint8_t type;
-  uint8_t workerMac[6];
-  uint8_t nodeType;   // 0x00 = worker, 0x01 = drone
-} heartbeat_t;
+  uint8_t  type;
+  uint8_t  workerMac[6];
+  uint8_t  nodeType;       // 0x00 = worker, 0x01 = drone
+  uint16_t swarmId;        // djb2 hash of swarm name (0 until swarm config added)
+  uint8_t  loyaltyLevel;   // 0=wild, 255=fully loyal (drone mechanic)
+  uint8_t  gangId;         // WDGWars gang affiliation (0=ungrouped)
+  uint8_t  firmwareVer;    // WASP_FIRMWARE_VER
+  uint8_t  battLevel;      // 0-100%, 255=unknown
+  uint16_t playerLevel;    // rank / promotion mechanic
+  uint8_t  boostLevel;     // active boost / buff tier
+  uint8_t  reserved[7];    // zero-filled, future game fields
+} heartbeat_t;             // 24 bytes
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -68,7 +77,15 @@ typedef struct __attribute__((packed)) {
   uint16_t bleCount;
   int8_t   bestRssi;
   uint32_t cycleCount;
-} scan_summary_t;
+  uint16_t swarmId;
+  uint8_t  loyaltyLevel;
+  uint8_t  gangId;
+  uint8_t  firmwareVer;
+  uint8_t  battLevel;
+  uint16_t playerLevel;
+  uint8_t  boostLevel;
+  uint8_t  reserved[7];
+} scan_summary_t;          // 52 bytes
 
 // ── Nest AP ───────────────────────────────────────────────────────────────────
 #define NEST_AP_SSID      "WASP-Nest"
@@ -361,8 +378,9 @@ static String buildCSV(int idx) {
 
 static void sendHeartbeat() {
   heartbeat_t pkt = {};
-  pkt.type     = WASP_PKT_HEARTBEAT;
-  pkt.nodeType = droneMode ? 1 : 0;
+  pkt.type        = WASP_PKT_HEARTBEAT;
+  pkt.nodeType    = droneMode ? 1 : 0;
+  pkt.firmwareVer = WASP_FIRMWARE_VER;
   WiFi.macAddress(pkt.workerMac);
   esp_now_send(NEST_MAC, (uint8_t*)&pkt, sizeof(pkt));
   lastHeartbeatMs = millis();
@@ -392,7 +410,8 @@ static void sendSummary(int wifiTotal, int wifi2g, int wifi5g,
                         int bleCount, int8_t bestRssi) {
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   scan_summary_t pkt = {};
-  pkt.type       = WASP_PKT_SUMMARY;
+  pkt.type        = WASP_PKT_SUMMARY;
+  pkt.firmwareVer = WASP_FIRMWARE_VER;
   pkt.gpsFix     = (gpsOk && gps.location.isValid()) ? 1 : 0;
   pkt.lat        = pkt.gpsFix ? (float)gps.location.lat() : 0.0f;
   pkt.lon        = pkt.gpsFix ? (float)gps.location.lng() : 0.0f;
