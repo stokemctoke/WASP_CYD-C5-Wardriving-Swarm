@@ -433,6 +433,8 @@ static void sendSummary(int wifiTotal, int wifi2g, int wifi5g,
 // ── File sync (worker mode) ───────────────────────────────────────────────────
 
 static bool connectToNest() {
+  sendHeartbeat();           // last signal before ESP-NOW goes dark
+  delay(50);
   esp_now_deinit();
   WiFi.mode(WIFI_STA);
   WiFi.begin(NEST_AP_SSID, NEST_AP_PASS);
@@ -452,6 +454,8 @@ static void disconnectFromNest() {
   WiFi.disconnect();
   delay(100);
   initEspNow();
+  delay(50);
+  sendHeartbeat();           // announce return immediately after ESP-NOW is back
 }
 
 static void syncFiles() {

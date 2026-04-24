@@ -125,9 +125,15 @@ WiFiServer  rawServer(8080);   // worker large-file uploads — streams directly
 
 // ── Worker registry helpers ───────────────────────────────────────────────────
 
-static int findOrAddWorker(const uint8_t* mac) {
+static int findWorker(const uint8_t* mac) {
   for (int i = 0; i < MAX_WORKERS; i++)
     if (memcmp(workers[i].mac, mac, 6) == 0) return i;
+  return -1;
+}
+
+static int findOrAddWorker(const uint8_t* mac) {
+  int idx = findWorker(mac);
+  if (idx >= 0) return idx;
   for (int i = 0; i < MAX_WORKERS; i++)
     if (workers[i].lastSeenMs == 0) { memcpy(workers[i].mac, mac, 6); return i; }
   return -1;
@@ -151,6 +157,9 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
              info.wifi_ap_staconnected.mac[2], info.wifi_ap_staconnected.mac[3],
              info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
     Serial.printf("[NEST] Worker connected: %s\n", mac);
+    // Refresh registry timeout — worker is alive, just syncing over WiFi
+    int idx = findWorker(info.wifi_ap_staconnected.mac);
+    if (idx >= 0) workers[idx].lastSeenMs = millis();
   } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
     Serial.println("[NEST] Worker disconnected");
   }
