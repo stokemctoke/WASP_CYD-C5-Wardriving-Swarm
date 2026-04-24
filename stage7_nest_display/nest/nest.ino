@@ -50,13 +50,13 @@
 #define AP_SSID        "WASP-Nest"
 #define AP_PASS        "waspswarm"
 
-// ── Display layout (320 × 240 landscape) ─────────────────────────────────────
-// HEADER(28) + STATUS(16) + 4 × ROW(44) + FOOTER(20) = 240
+// ── Display layout (240 × 320 portrait) ──────────────────────────────────────
+// HEADER(28) + STATUS(16) + 5 × ROW(52) + FOOTER(16) = 320
 #define HEADER_H  28
 #define STATUS_H  16
-#define ROW_H     44
-#define MAX_ROWS   4
-#define FOOTER_H  20
+#define ROW_H     52
+#define MAX_ROWS   5
+#define FOOTER_H  16
 
 // ── Colors (RGB565) ───────────────────────────────────────────────────────────
 #define CLR_BG        TFT_BLACK
@@ -329,7 +329,7 @@ static uint16_t rssiColor(int8_t r) {
 // ── Display drawing ───────────────────────────────────────────────────────────
 
 static void drawHeader() {
-  tft.fillRect(0, 0, 320, HEADER_H, CLR_HDR_BG);
+  tft.fillRect(0, 0, 240, HEADER_H, CLR_HDR_BG);
   tft.setTextColor(CLR_HDR_FG, CLR_HDR_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextFont(4);
@@ -338,7 +338,7 @@ static void drawHeader() {
   tft.setTextDatum(MR_DATUM);
   char buf[12];
   snprintf(buf, sizeof(buf), "ch:%d", ESPNOW_CHANNEL);
-  tft.drawString(buf, 314, HEADER_H / 2);
+  tft.drawString(buf, 234, HEADER_H / 2);
 }
 
 static void drawWorkerRow(int row, const worker_entry_t& w) {
@@ -351,17 +351,17 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   uint16_t baseColor = isDrone ? TFT_CYAN : CLR_ACTIVE;
   uint16_t nameColor = active ? (stale ? CLR_STALE : baseColor) : CLR_OFFLINE;
 
-  tft.fillRect(0, y, 320, ROW_H, CLR_BG);
-  tft.drawFastHLine(0, y + ROW_H - 1, 320, CLR_DIVIDER);
+  tft.fillRect(0, y, 240, ROW_H, CLR_BG);
+  tft.drawFastHLine(0, y + ROW_H - 1, 240, CLR_DIVIDER);
 
   // Status dot — green = worker, cyan = drone, yellow = stale, grey = offline
-  tft.fillCircle(8, y + 12, 5, nameColor);
+  tft.fillCircle(8, y + 14, 5, nameColor);
 
   // W / D type label next to dot
   tft.setTextFont(1);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(nameColor, CLR_BG);
-  tft.drawString(isDrone ? "D" : "W", 16, y + 8);
+  tft.drawString(isDrone ? "D" : "W", 16, y + 10);
 
   // MAC address — line 1 left
   char mac[18];
@@ -370,42 +370,42 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   tft.setTextFont(2);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(nameColor, CLR_BG);
-  tft.drawString(mac, 26, y + 11);
+  tft.drawString(mac, 26, y + 14);
 
   // RSSI — line 1 right
   char rssiStr[10];
   snprintf(rssiStr, sizeof(rssiStr), "%d dBm", w.rssi);
   tft.setTextColor(rssiColor(w.rssi), CLR_BG);
   tft.setTextDatum(MR_DATUM);
-  tft.drawString(rssiStr, 314, y + 11);
+  tft.drawString(rssiStr, 234, y + 14);
 
   // Line 2
   tft.setTextDatum(ML_DATUM);
   if (w.lastSummaryMs == 0) {
     tft.setTextColor(CLR_LABEL, CLR_BG);
-    tft.drawString("awaiting scan data...", 26, y + 31);
+    tft.drawString("awaiting scan data...", 26, y + 38);
     return;
   }
 
   if (w.gpsFix) {
     tft.setTextColor(CLR_GPS_OK, CLR_BG);
-    tft.drawString("FIX", 26, y + 31);
+    tft.drawString("FIX", 26, y + 38);
   } else {
     tft.setTextColor(CLR_GPS_NO, CLR_BG);
-    tft.drawString("NO FIX", 26, y + 31);
+    tft.drawString("NO FIX", 26, y + 38);
   }
 
   char scanLine[40];
   snprintf(scanLine, sizeof(scanLine), "W:%d(%d+%d) B:%d #%u",
            w.wifiTotal, w.wifi2g, w.wifi5g, w.bleCount, (unsigned)w.cycleCount);
   tft.setTextColor(CLR_LABEL, CLR_BG);
-  tft.drawString(scanLine, w.gpsFix ? 64 : 94, y + 31);
+  tft.drawString(scanLine, w.gpsFix ? 64 : 94, y + 38);
 }
 
 static void refreshDisplay() {
   // Status bar
   int active = countActiveWorkers();
-  tft.fillRect(0, HEADER_H, 320, STATUS_H, CLR_BG);
+  tft.fillRect(0, HEADER_H, 240, STATUS_H, CLR_BG);
   tft.setTextFont(2);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(CLR_LABEL, CLR_BG);
@@ -420,12 +420,12 @@ static void refreshDisplay() {
   }
   for (; row < MAX_ROWS; row++) {
     int y = HEADER_H + STATUS_H + row * ROW_H;
-    tft.fillRect(0, y, 320, ROW_H, CLR_BG);
+    tft.fillRect(0, y, 240, ROW_H, CLR_BG);
   }
 
   // Footer — last sync event
-  int fy = 240 - FOOTER_H;
-  tft.fillRect(0, fy, 320, FOOTER_H, CLR_FTR_BG);
+  int fy = 320 - FOOTER_H;
+  tft.fillRect(0, fy, 240, FOOTER_H, CLR_FTR_BG);
   tft.setTextFont(1);
   tft.setTextColor(CLR_LABEL, CLR_FTR_BG);
   tft.setTextDatum(ML_DATUM);
@@ -451,13 +451,13 @@ void setup() {
 
   // Display — boot screen while initialising
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(0);
   tft.fillScreen(CLR_BG);
   drawHeader();
   tft.setTextFont(2);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(CLR_LABEL, CLR_BG);
-  tft.drawString("Initialising...", 160, 140);
+  tft.drawString("Initialising...", 120, 160);
 
   // SD — VSPI (separate bus from display)
   sdSpi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
@@ -500,7 +500,7 @@ void setup() {
   Serial.println(" Ready — waiting for workers\n");
 
   // Clear boot message, draw initial display state
-  tft.fillRect(0, HEADER_H, 320, 240 - HEADER_H, CLR_BG);
+  tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
   refreshDisplay();
 }
 
