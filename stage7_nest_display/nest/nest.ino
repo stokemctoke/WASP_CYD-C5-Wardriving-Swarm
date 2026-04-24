@@ -96,8 +96,10 @@ typedef struct __attribute__((packed)) {
 } scan_summary_t;
 
 // ── Worker registry ───────────────────────────────────────────────────────────
-#define MAX_WORKERS       8
-#define WORKER_TIMEOUT_MS 30000
+#define MAX_WORKERS        8
+#define WORKER_TIMEOUT_MS  30000   // grey on display after 30 s
+#define WORKER_DISPLAY_MS  90000   // hide from display after 90 s (18 missed heartbeats)
+#define WORKER_REMOVE_MS  300000   // free registry slot after 5 min
 
 struct worker_entry_t {
   uint8_t  mac[6];
@@ -413,10 +415,12 @@ static void refreshDisplay() {
   snprintf(buf, sizeof(buf), "Workers in range: %d", active);
   tft.drawString(buf, 6, HEADER_H + STATUS_H / 2);
 
-  // Worker rows
+  // Worker rows — only show workers seen within WORKER_DISPLAY_MS
+  uint32_t now = millis();
   int row = 0;
   for (int i = 0; i < MAX_WORKERS && row < MAX_ROWS; i++) {
-    if (workers[i].lastSeenMs > 0) drawWorkerRow(row++, workers[i]);
+    if (workers[i].lastSeenMs > 0 && (now - workers[i].lastSeenMs) < WORKER_DISPLAY_MS)
+      drawWorkerRow(row++, workers[i]);
   }
   for (; row < MAX_ROWS; row++) {
     int y = HEADER_H + STATUS_H + row * ROW_H;
@@ -432,6 +436,22 @@ static void refreshDisplay() {
   char fbuf[52];
   snprintf(fbuf, sizeof(fbuf), "Last sync: %s", lastSyncStr);
   tft.drawString(fbuf, 6, fy + FOOTER_H / 2);
+}
+
+// ── Registry cleanup ──────────────────────────────────────────────────────────
+
+static void cleanRegistry() {
+  uint32_t now = millis();
+  for (int i = 0; i < MAX_WORKERS; i++) {
+    if (workers[i].lastSeenMs == 0) continue;
+    if ((now - workers[i].lastSeenMs) < WORKER_REMOVE_MS) continue;
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             workers[i].mac[0], workers[i].mac[1], workers[i].mac[2],
+             workers[i].mac[3], workers[i].mac[4], workers[i].mac[5]);
+    Serial.printf("[NEST] Worker %s expired — slot freed\n", mac);
+    memset(&workers[i], 0, sizeof(workers[i]));
+  }
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -511,8 +531,15 @@ void loop() {
   handleRawUpload();
 
   static uint32_t lastRefresh = 0;
-  if (millis() - lastRefresh >= 1000) {
+  static uint32_t lastClean   = 0;
+  uint32_t now = millis();
+
+  if (now - lastRefresh >= 1000) {
     refreshDisplay();
-    lastRefresh = millis();
+    lastRefresh = now;
+  }
+  if (now - lastClean >= 30000) {
+    cleanRegistry();
+    lastClean = now;
   }
 }
