@@ -364,23 +364,35 @@ static void handleRawUpload() {
   File f = SD.open(path.c_str(), FILE_WRITE);
   if (!f) { client.println("ERR sd open failed"); client.stop(); return; }
 
+  client.println("READY");  // tell worker we're open and ready for data
+
   uint8_t buf[256];
-  int remaining = fileSize;
+  int    remaining = fileSize;
+  size_t written   = 0;
   while (remaining > 0 && client.connected()) {
-    int toRead = min(remaining, (int)sizeof(buf));
-    int n      = client.readBytes(buf, toRead);
+    int    toRead = min(remaining, (int)sizeof(buf));
+    int    n      = client.readBytes(buf, toRead);
     if (n <= 0) break;
-    f.write(buf, n);
+    written   += f.write(buf, n);
     remaining -= n;
+    yield();  // feed watchdog — SD writes block the main task
+  }
+  f.close();
+
+  Serial.printf("[NEST] recv %u/%d B for %s\n", (unsigned)written, fileSize, fileName.c_str());
+
+  if ((int)written < fileSize) {
+    client.println("ERR transfer incomplete");
+    client.stop();
+    SD.remove(path.c_str());
+    return;
   }
 
-  size_t saved = f.size();
-  f.close();
   client.println("OK");
   client.stop();
 
-  snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)saved);
-  Serial.printf("[NEST] Saved %s (%d bytes)\n", path.c_str(), (int)saved);
+  snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)written);
+  Serial.printf("[NEST] Saved %s (%u bytes)\n", path.c_str(), (unsigned)written);
 }
 
 // ── HTTP upload handler (drone small CSV uploads) ─────────────────────────────

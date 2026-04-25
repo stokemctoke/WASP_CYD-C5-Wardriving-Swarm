@@ -246,7 +246,7 @@ static bool openLogFile() {
   logPath = newLogPath();
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) { Serial.printf("[SD] Failed to open %s\n", logPath.c_str()); return false; }
-  logFile.println("WigleWifi-1.6,appRelease=1,model=XIAO-ESP32C5,release=1,device=WASP-Worker,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0");
+  logFile.println("WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Worker,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0");
   logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type");
   logFile.flush();
   Serial.printf("[SD] Log: %s\n", logPath.c_str());
@@ -340,7 +340,7 @@ static String buildCSV(int idx) {
   const cycle_slot_t& s = cycleBuffer[idx];
   String csv;
   csv.reserve(2048);
-  csv += "WigleWifi-1.6,appRelease=1,model=XIAO-ESP32C5,release=1,device=WASP-Drone,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0\n";
+  csv += "WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Drone,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0\n";
   csv += "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n";
 
   for (int i = 0; i < s.wifiCount; i++) {
@@ -432,6 +432,23 @@ static void sendSummary(int wifiTotal, int wifi2g, int wifi5g,
 
 // ── File sync (worker mode) ───────────────────────────────────────────────────
 
+static bool hasPendingFiles() {
+  File dir = SD.open("/logs");
+  if (!dir) return false;
+  bool found = false;
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    bool isDir = entry.isDirectory();
+    String name = String(entry.name());
+    size_t sz = entry.size();
+    entry.close();
+    if (!isDir && name.endsWith(".csv") && sz > 0) { found = true; break; }
+  }
+  dir.close();
+  return found;
+}
+
 static bool connectToNest() {
   sendHeartbeat();           // last signal before ESP-NOW goes dark
   delay(50);
@@ -459,73 +476,147 @@ static void disconnectFromNest() {
 }
 
 static void syncFiles() {
-  Serial.println("\n[SYNC] Connecting to Nest AP...");
+  Serial.println("\n[SYNC] Starting...");
   if (logFile) { logFile.flush(); logFile.close(); }
 
-  if (!connectToNest()) {
-    Serial.println("[SYNC] Nest not reachable — will retry next cycle");
-    disconnectFromNest();
-    if (sdOk) openLogFile();
-    return;
-  }
+  int uploaded = 0, failed = 0;
 
-  Serial.printf("[SYNC] Connected  IP: %s\n", WiFi.localIP().toString().c_str());
-  String myMac = WiFi.macAddress(); myMac.replace(":", "");
-  int uploaded = 0, skipped = 0, failed = 0;
+  // Process one file per iteration — read SD (WiFi off), connect, send from RAM,
+  // disconnect (restores SPI DMA), repeat. Avoids accumulating buffers in heap.
+  for (int pass = 0; pass < 200; pass++) {
 
-  File dir = SD.open("/logs");
-  if (!dir) {
-    Serial.println("[SYNC] ERROR: could not open /logs on SD");
-    disconnectFromNest();
-    if (sdOk) openLogFile();
-    return;
-  }
-
-  while (true) {
-    File entry = dir.openNextFile();
-    if (!entry) break;
-    String name = String(entry.name());
-    size_t sz   = entry.size();
-    bool   isDir = entry.isDirectory();
-    entry.close();
-    if (isDir)                  { skipped++; continue; }
-    if (!name.endsWith(".csv")) { skipped++; continue; }
-    if (sz == 0)                { skipped++; continue; }
-
-    // entry.name() may return full path or bare name depending on library version
-    String path = name.startsWith("/") ? name : "/logs/" + name;
-    Serial.printf("[SYNC]  %-30s  %5d B  ...", name.c_str(), (int)sz);
-    File f = SD.open(path);
-    if (!f) { Serial.printf("open failed (path=%s)\n", path.c_str()); failed++; continue; }
-
-    // Raw TCP upload — streams file in 256-byte chunks directly to nest port 8080.
-    // Avoids the Arduino WebServer's large heap String allocation that caused cascade
-    // failures (HTTP -3 → -1) on sequential uploads of files > ~4KB.
-    WiFiClient tcp;
-    bool ok = false;
-    if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
-      tcp.setTimeout(10000);
-      tcp.printf("UPLOAD %s %s %d\n", myMac.c_str(), name.c_str(), (int)sz);
-      uint8_t tbuf[256];
-      while (f.available()) {
-        int n = f.read(tbuf, sizeof(tbuf));
-        tcp.write(tbuf, n);
+    // ── Find next pending .csv (SD works, WiFi off) ──────────────────────────
+    String name, path;
+    int sz = 0;
+    {
+      File dir = SD.open("/logs");
+      if (!dir) break;
+      bool found = false;
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String n = String(entry.name());
+        bool   d = entry.isDirectory();
+        int    s = (int)entry.size();
+        entry.close();
+        if (!d && n.endsWith(".csv") && s > 0) { name = n; sz = s; found = true; break; }
       }
-      tcp.flush();
-      String resp = tcp.readStringUntil('\n');
-      resp.trim();
-      ok = (resp == "OK");
+      dir.close();
+      if (!found) break;
+      path = name.startsWith("/") ? name : "/logs/" + name;
     }
+
+    // ── Read file to heap before any WiFi operation ──────────────────────────
+    uint8_t* buf = (uint8_t*)malloc(sz);
+    if (!buf) {
+      Serial.printf("[SYNC]  OOM %s (%d B) — deferred\n", name.c_str(), sz);
+      SD.rename(path.c_str(), (path + ".defer").c_str());
+      continue;
+    }
+    File f = SD.open(path);
+    if (!f) {
+      free(buf);
+      Serial.printf("[SYNC]  open failed: %s\n", path.c_str());
+      SD.rename(path.c_str(), (path + ".defer").c_str());
+      continue;
+    }
+    f.seek(0);
+    int n = f.read(buf, sz);
     f.close();
-    tcp.stop();
+    if (n != sz) {
+      free(buf);
+      Serial.printf("[SYNC]  bad read %d/%d B — %s marked bad\n", n, sz, name.c_str());
+      SD.rename(path.c_str(), (path + ".bad").c_str());
+      failed++;
+      continue;
+    }
+    Serial.printf("[SYNC]  %-32s  %5d B  ...", name.c_str(), sz);
 
-    if (ok) { SD.rename(path.c_str(), (path + ".done").c_str()); Serial.println(" OK"); uploaded++; }
-    else     { Serial.println(" FAILED"); failed++; }
+    // ── Connect, send from RAM, disconnect (no SD reads needed) ─────────────
+    bool nestOk = connectToNest();
+    bool ok     = false;
+    int  sent   = 0;
+    bool tcpFail = false;
+    if (nestOk) {
+      Serial.printf(" [%s]", WiFi.localIP().toString().c_str());
+      String myMac = WiFi.macAddress(); myMac.replace(":", "");
+      WiFiClient tcp;
+      Serial.print(" tcp..");
+      if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
+        tcp.setNoDelay(true);   // disable Nagle — force immediate TX
+        tcp.setTimeout(10000);
+        Serial.print("OK hdr..");
+        tcp.printf("UPLOAD %s %s %d\n", myMac.c_str(), name.c_str(), sz);
+        tcp.flush();
+        // wait for nest to open SD file and signal it's ready for data
+        Serial.print("rdy..");
+        String ready = tcp.readStringUntil('\n'); ready.trim();
+        if (ready == "READY") {
+          Serial.print("OK data..");
+          uint8_t* ptr = buf; int rem = sz;
+          uint32_t wDeadline = millis() + 20000;
+          while (rem > 0 && tcp.connected() && millis() < wDeadline) {
+            int c = min(rem, 256);
+            int w = tcp.write(ptr, c);
+            if (w > 0) { ptr += w; sent += w; rem -= w; }
+            else { delay(1); }  // send buffer full — yield to WiFi task to drain
+          }
+          tcp.flush();
+          Serial.printf("%dB resp..", sent);
+          String resp = tcp.readStringUntil('\n'); resp.trim();
+          Serial.printf("[%s]", resp.c_str());
+          ok = (resp == "OK") && (sent == sz);
+        } else {
+          Serial.printf("[nest READY? got: %s]", ready.c_str());
+        }
+      } else {
+        Serial.print("FAIL");
+        tcpFail = true;
+      }
+      tcp.stop();
+    }
+    free(buf);
+    disconnectFromNest();  // WiFi.disconnect naturally restores DMA for SD
+
+    if (ok) {
+      SD.rename(path.c_str(), (path + ".done").c_str());
+      Serial.printf(" OK\n"); uploaded++;
+    } else if (!nestOk || tcpFail) {
+      Serial.println("\n[SYNC] Nest TCP not reachable — stopping");
+      break;
+    } else {
+      Serial.printf(" FAILED (%d/%d B) — deferred\n", sent, sz);
+      SD.rename(path.c_str(), (path + ".defer").c_str());
+      failed++;
+    }
+    delay(500);  // let nest SD stack flush/reclaim file handles between uploads
   }
-  dir.close();
-  Serial.printf("[SYNC] Done — %d uploaded, %d failed, %d skipped\n", uploaded, failed, skipped);
 
-  disconnectFromNest();
+  // ── Restore deferred files to .csv for retry next boot ──────────────────────
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String n = String(entry.name());
+        bool   d = entry.isDirectory();
+        entry.close();
+        if (!d && n.endsWith(".csv.defer")) {
+          String op = "/logs/" + n;
+          SD.rename(op.c_str(), op.substring(0, op.length() - 6).c_str());
+        }
+      }
+      dir.close();
+    }
+  }
+
+  // Reinit SPI+SD once after all WiFi activity — ensures clean DMA state for
+  // subsequent SD operations and for SD.begin() on the next boot.
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  SD.begin(SD_CS, SPI);
+
+  Serial.printf("[SYNC] Done — %d uploaded, %d failed\n", uploaded, failed);
   if (sdOk) openLogFile();
 }
 
@@ -760,6 +851,13 @@ void setup() {
   }
   Serial.printf(" │  Sync  :  every %d cycles             │\n", SYNC_EVERY);
   Serial.println(" └─────────────────────────────────────┘\n");
+
+  // Upload any files left from the previous session before starting scan cycles.
+  // syncFiles() re-opens a fresh log file at the end, so no double-open.
+  if (!droneMode && sdOk && hasPendingFiles()) {
+    Serial.println(" Pending files found — syncing to Nest before first cycle...");
+    syncFiles();
+  }
 
   feedGPS(500);
   Serial.println(" Setup complete\n");

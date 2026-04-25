@@ -105,6 +105,8 @@ struct worker_entry_t {
   uint8_t  mac[6];
   uint32_t lastSeenMs;
   uint32_t lastSummaryMs;
+  uint32_t lastUploadMs;    // set on successful TCP file upload
+  uint32_t lastUploadBytes;
   int8_t   rssi;
   uint8_t  gpsFix;
   uint16_t wifiTotal;
@@ -274,23 +276,47 @@ static void handleRawUpload() {
   File f = SD.open(path.c_str(), FILE_WRITE);
   if (!f) { client.println("ERR sd open failed"); client.stop(); return; }
 
+  client.println("READY");  // tell worker we're open and ready for data
+
   uint8_t buf[256];
-  int remaining = fileSize;
+  int    remaining = fileSize;
+  size_t written   = 0;
   while (remaining > 0 && client.connected()) {
-    int toRead = min(remaining, (int)sizeof(buf));
-    int n      = client.readBytes(buf, toRead);
+    int    toRead = min(remaining, (int)sizeof(buf));
+    int    n      = client.readBytes(buf, toRead);
     if (n <= 0) break;
-    f.write(buf, n);
+    written   += f.write(buf, n);
     remaining -= n;
+    yield();  // feed watchdog — SD writes block the main task
+  }
+  f.close();
+
+  Serial.printf("[NEST] recv %u/%d B for %s\n", (unsigned)written, fileSize, fileName.c_str());
+
+  if ((int)written < fileSize) {
+    client.println("ERR transfer incomplete");
+    client.stop();
+    SD.remove(path.c_str());
+    return;
   }
 
-  size_t saved = f.size();
-  f.close();
   client.println("OK");
   client.stop();
 
-  snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)saved);
-  Serial.printf("[NEST] Saved %s (%d bytes)\n", path.c_str(), (int)saved);
+  snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)written);
+  Serial.printf("[NEST] Saved %s (%u bytes)\n", path.c_str(), (unsigned)written);
+
+  // Update worker registry so display clears "awaiting scan data..."
+  uint8_t macBytes[6] = {};
+  for (int i = 0; i < 6; i++) {
+    char hex[3] = { workerMac[i*2], workerMac[i*2+1], '\0' };
+    macBytes[i] = (uint8_t)strtol(hex, nullptr, 16);
+  }
+  int widx = findWorker(macBytes);
+  if (widx >= 0) {
+    workers[widx].lastUploadMs    = millis();
+    workers[widx].lastUploadBytes = written;
+  }
 }
 
 // ── HTTP upload handler (drone small CSV uploads) ─────────────────────────────
@@ -394,7 +420,13 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   tft.setTextDatum(ML_DATUM);
   if (w.lastSummaryMs == 0) {
     tft.setTextColor(CLR_LABEL, CLR_BG);
-    tft.drawString("awaiting scan data...", 26, y + 38);
+    if (w.lastUploadMs > 0) {
+      char upStr[28];
+      snprintf(upStr, sizeof(upStr), "synced  %luB", w.lastUploadBytes);
+      tft.drawString(upStr, 26, y + 38);
+    } else {
+      tft.drawString("awaiting scan data...", 26, y + 38);
+    }
     return;
   }
 

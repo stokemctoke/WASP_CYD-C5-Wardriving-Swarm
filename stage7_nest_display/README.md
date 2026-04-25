@@ -33,6 +33,6 @@ The CYD display runs in portrait mode (240 × 320, USB-C at bottom, antenna at t
 
 ## Files
 
-| File | Board |
-|---|---|
+| File            | Board                  |
+| --------------- | ---------------------- |
 | `nest/nest.ino` | CYD (ESP32 Dev Module) |
