@@ -42,6 +42,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <vector>
+#include <sys/time.h>
 
 // ── ESP-NOW ───────────────────────────────────────────────────────────────────
 #define ESPNOW_CHANNEL 1
@@ -162,6 +163,7 @@ static uint8_t      pendingBleCount  = 0;
 static bool     sdOk            = false;
 static bool     gpsOk           = false;
 static bool     droneMode       = false;
+static bool     clockSet        = false;
 static File     logFile;
 static String   logPath;
 static uint32_t linesSinceFlush = 0;
@@ -215,6 +217,34 @@ static String gpsTimestamp() {
            gps.date.year(), gps.date.month(), gps.date.day(),
            gps.time.hour(), gps.time.minute(), gps.time.second());
   return String(buf);
+}
+
+static String nowTimestamp() {
+  time_t now = time(nullptr);
+  if (now < 1000000000UL) return "1970-01-01 00:00:00";
+  struct tm* t = gmtime(&now);
+  char buf[20];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", t);
+  return String(buf);
+}
+
+static void setClockFromGPS() {
+  if (clockSet || !gps.date.isValid() || !gps.time.isValid()) return;
+  if (gps.date.year() < 2020) return;  // sanity check
+  struct tm t = {};
+  t.tm_year = gps.date.year() - 1900;
+  t.tm_mon  = gps.date.month() - 1;
+  t.tm_mday = gps.date.day();
+  t.tm_hour = gps.time.hour();
+  t.tm_min  = gps.time.minute();
+  t.tm_sec  = gps.time.second();
+  time_t epoch = mktime(&t);
+  struct timeval tv = { epoch, 0 };
+  settimeofday(&tv, nullptr);
+  clockSet = true;
+  Serial.printf("[GPS] Clock set: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                gps.date.year(), gps.date.month(), gps.date.day(),
+                gps.time.hour(), gps.time.minute(), gps.time.second());
 }
 
 // ── SD / file helpers (worker mode) ──────────────────────────────────────────
@@ -351,9 +381,9 @@ static String buildCSV(int idx) {
     String ssid = String(w.ssid);
     ssid.replace("\"", "\"\"");
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",%s,1970-01-01 00:00:00,%d,%d,%d,0.000000,0.000000,0,999.9,,,WIFI",
+    snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,0.000000,0.000000,0,999.9,,,WIFI",
              bssid, ssid.c_str(), wigleAuth((wifi_auth_mode_t)w.auth),
-             w.channel, channelToFreq(w.channel), w.rssi);
+             nowTimestamp().c_str(), w.channel, channelToFreq(w.channel), w.rssi);
     csv += line; csv += '\n';
   }
 
@@ -367,8 +397,8 @@ static String buildCSV(int idx) {
     char mfgrField[8] = "";
     if (b.hasMfgr) snprintf(mfgrField, sizeof(mfgrField), "%u", b.mfgrId);
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],1970-01-01 00:00:00,0,,%d,0.000000,0.000000,0,999.9,,%s,BLE",
-             addr, name.c_str(), b.rssi, mfgrField);
+    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,0.000000,0.000000,0,999.9,,%s,BLE",
+             addr, name.c_str(), nowTimestamp().c_str(), b.rssi, mfgrField);
     csv += line; csv += '\n';
   }
   return csv;
@@ -869,7 +899,7 @@ void loop() {
   Serial.println("\n========================================");
   maybeHeartbeat();
 
-  if (gpsOk) feedGPS(GPS_FEED_MS);
+  if (gpsOk) { feedGPS(GPS_FEED_MS); setClockFromGPS(); }
   printGPSStatus();
 
   if (droneMode) clearPending();
