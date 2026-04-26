@@ -322,6 +322,33 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   Serial.printf("       BLE:  %d device(s)\n", pkt->bleCount);
 }
 
+// ── Upload input validation ──────────────────────────────────────────────────
+// All upload paths take a worker MAC and a filename from the network and use
+// them directly in SD path construction. Both must be allowlisted before use,
+// or a malicious / buggy worker can write outside /logs/ via path traversal.
+
+static bool isValidMac(const String& mac) {
+  if (mac.length() != 12) return false;
+  for (unsigned int i = 0; i < mac.length(); i++) {
+    char c = mac[i];
+    if (!((c >= '0' && c <= '9') ||
+          (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+static bool isValidFilename(const String& name) {
+  if (name.isEmpty() || name.length() > 64) return false;
+  if (!name.endsWith(".csv")) return false;
+  if (name.indexOf("..") >= 0) return false;     // explicit traversal guard
+  for (unsigned int i = 0; i < name.length(); i++) {
+    char c = name[i];
+    if (!isAlphaNumeric(c) && c != '_' && c != '-' && c != '.') return false;
+  }
+  return true;
+}
+
 // ── Raw TCP upload handler (port 8080) ────────────────────────────────────────
 // Header: "UPLOAD <MAC_NO_COLONS> <FILENAME> <SIZE_BYTES>\n"
 // Response: "OK\n" or "ERR <reason>\n"
@@ -347,7 +374,14 @@ static void handleRawUpload() {
   String fileName  = hdr.substring(s2 + 1, s3);
   int    fileSize  = hdr.substring(s3 + 1).toInt();
 
-  if (!sdOk || fileSize <= 0 || fileName.isEmpty() || workerMac.isEmpty()) {
+  if (!sdOk || fileSize <= 0) {
+    client.println("ERR bad params");
+    client.stop();
+    return;
+  }
+  if (!isValidMac(workerMac) || !isValidFilename(fileName)) {
+    Serial.printf("[NEST] Rejected upload: mac='%s' file='%s' (validation failed)\n",
+                  workerMac.c_str(), fileName.c_str());
     client.println("ERR bad params");
     client.stop();
     return;
@@ -358,6 +392,10 @@ static void handleRawUpload() {
   if (!SD.exists("/logs")) SD.mkdir("/logs");
   if (!SD.exists(dir))     SD.mkdir(dir);
 
+  // Truncate any prior partial upload — Arduino's FILE_WRITE is append mode,
+  // which would silently concatenate retried uploads onto a corrupt remainder.
+  if (SD.exists(path.c_str())) SD.remove(path.c_str());
+
   File f = SD.open(path.c_str(), FILE_WRITE);
   if (!f) { client.println("ERR sd open failed"); client.stop(); return; }
 
@@ -367,16 +405,33 @@ static void handleRawUpload() {
   int      remaining = fileSize;
   size_t   written   = 0;
   uint32_t deadline  = millis() + 30000;
+  bool     sdFail    = false;
   while (remaining > 0 && client.connected() && millis() < deadline) {
     int n = client.read(buf, min(remaining, (int)sizeof(buf)));
     if (n > 0) {
-      written   += f.write(buf, n);
+      size_t wrote = f.write(buf, n);
+      written += wrote;
+      if ((int)wrote < n) {
+        // SD full / removed / FAT corruption — without this check we'd happily
+        // drain the rest of the TCP stream into the void and tell the worker OK.
+        Serial.printf("[NEST] SD write short %u/%d — aborting (card full or removed?)\n",
+                      (unsigned)wrote, n);
+        sdFail = true;
+        break;
+      }
       remaining -= n;
     } else {
       yield();  // no data yet — give WiFi stack CPU time so ACKs go out promptly
     }
   }
   f.close();
+
+  if (sdFail) {
+    SD.remove(path.c_str());
+    client.println("ERR sd write failed");
+    client.stop();
+    return;
+  }
 
   Serial.printf("[NEST] recv %u/%d B for %s\n", (unsigned)written, fileSize, fileName.c_str());
 
@@ -404,15 +459,8 @@ static void handleUpload() {
   String workerMac = server.arg("worker");
   String fileName  = server.arg("file");
 
-  for (unsigned int i = 0; i < fileName.length(); i++) {
-    char c = fileName[i];
-    if (!isAlphaNumeric(c) && c != '_' && c != '-' && c != '.') {
-      server.send(400, "text/plain", "Bad filename"); return;
-    }
-  }
-  if (fileName.isEmpty() || !fileName.endsWith(".csv")) {
-    server.send(400, "text/plain", "Filename must end in .csv"); return;
-  }
+  if (!isValidMac(workerMac))      { server.send(400, "text/plain", "Bad worker");   return; }
+  if (!isValidFilename(fileName))  { server.send(400, "text/plain", "Bad filename"); return; }
 
   String dir  = "/logs/" + workerMac;
   String path = dir + "/" + fileName;
@@ -421,10 +469,20 @@ static void handleUpload() {
   if (!SD.exists(dir))     SD.mkdir(dir);
 
   String body = server.arg("plain");
+  // Truncate prior partial upload — FILE_WRITE is append mode, which would
+  // corrupt the file by concatenating onto a previous failed transfer.
+  if (SD.exists(path.c_str())) SD.remove(path.c_str());
   File f = SD.open(path.c_str(), FILE_WRITE);
-  if (!f) { server.send(500, "text/plain", "SD write failed"); return; }
-  f.print(body);
+  if (!f) { server.send(500, "text/plain", "SD open failed"); return; }
+  size_t wrote = f.print(body);
   f.close();
+  if (wrote < body.length()) {
+    SD.remove(path.c_str());
+    Serial.printf("[NEST] SD write short %u/%u for %s\n",
+                  (unsigned)wrote, (unsigned)body.length(), path.c_str());
+    server.send(500, "text/plain", "SD write failed");
+    return;
+  }
 
   taskENTER_CRITICAL(&gLock);
   snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), body.length());
