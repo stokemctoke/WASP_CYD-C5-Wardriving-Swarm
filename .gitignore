@@ -4,3 +4,6 @@ wasp.cfg
 # Keeps me up to date on what I've done
 LastSession.md
 
+# Claude Code local tool state
+.claude/
+
