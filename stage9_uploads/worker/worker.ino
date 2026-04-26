@@ -117,6 +117,15 @@ typedef struct __attribute__((packed)) {
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
 #define HEARTBEAT_INTERVAL_MS 5000
 
+// ── Log file size cap ─────────────────────────────────────────────────────────
+// The C5's TCP send path becomes unreliable for files above ~10–15 KB during
+// sustained throughput — the worker's tcp.write() stops draining at 3 × MTU
+// (4380 B) for reasons we can't diagnose without driver-level visibility.
+// Capping each log file at MAX_LOG_BYTES means every upload stays in the
+// reliably-working size range; the active log rotates to a new file when it
+// hits the cap, and any pre-existing oversized files are set aside.
+#define MAX_LOG_BYTES 12288
+
 // ── RAM buffer (drone mode) ───────────────────────────────────────────────────
 #define CYCLE_SLOTS        25
 #define MAX_WIFI_PER_SLOT  40
@@ -258,6 +267,16 @@ static void flushLog() {
 
 static void maybeFlush() {
   if (++linesSinceFlush >= 25 || (millis() - lastFlushMs) >= 2000) flushLog();
+  // Rotate to a new log file once we cross the size cap. The current row has
+  // already been written to the open file; the next row will land in the new
+  // one. Files stay self-contained CSVs because openLogFile() rewrites the
+  // WigleWifi-1.6 header for each new file.
+  if (logFile && (int)logFile.size() >= MAX_LOG_BYTES) {
+    Serial.printf("[SD] Rotating log: %s reached %u B (cap %d)\n",
+                  logPath.c_str(), (unsigned)logFile.size(), MAX_LOG_BYTES);
+    logFile.close();
+    openLogFile();
+  }
 }
 
 static String newLogPath() {
@@ -543,6 +562,18 @@ static void syncFiles() {
       dir.close();
       if (!found) break;
       path = name.startsWith("/") ? name : "/logs/" + name;
+    }
+
+    // ── Set aside files that exceed the C5's reliable upload size ───────────
+    // These would either OOM on the malloc below or stall partway through TCP
+    // send (the 4380-byte symptom). Renaming to .toobig stops the sync loop
+    // from tripping over them every cycle; data is preserved on the SD card
+    // for offline recovery.
+    if (sz > MAX_LOG_BYTES) {
+      Serial.printf("[SYNC]  %-32s  %5d B  exceeds cap (%d B) — set aside as .toobig\n",
+                    name.c_str(), sz, MAX_LOG_BYTES);
+      SD.rename(path.c_str(), (path + ".toobig").c_str());
+      continue;
     }
 
     Serial.printf("[SYNC]  %-32s  %5d B  ...", name.c_str(), sz);
