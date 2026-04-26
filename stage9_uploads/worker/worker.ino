@@ -118,13 +118,13 @@ typedef struct __attribute__((packed)) {
 #define HEARTBEAT_INTERVAL_MS 5000
 
 // ── Log file size cap ─────────────────────────────────────────────────────────
-// The C5's TCP send path becomes unreliable for files above ~10–15 KB during
-// sustained throughput — the worker's tcp.write() stops draining at 3 × MTU
-// (4380 B) for reasons we can't diagnose without driver-level visibility.
-// Capping each log file at MAX_LOG_BYTES means every upload stays in the
-// reliably-working size range; the active log rotates to a new file when it
-// hits the cap, and any pre-existing oversized files are set aside.
-#define MAX_LOG_BYTES 12288
+// The C5's TCP send path stalls on payloads above ~9.5 KB (observed ceiling
+// during live testing). Cap is set well below that threshold so that even a
+// file that gets one final row written after the rotation check triggers stays
+// safely under the reliable limit. Files already on the SD that exceed this
+// cap are renamed .toobig and skipped; they can be recovered via chunked
+// upload (Stage 10) or by reading the SD card directly on a PC.
+#define MAX_LOG_BYTES 8192
 
 // ── RAM buffer (drone mode) ───────────────────────────────────────────────────
 #define CYCLE_SLOTS        25

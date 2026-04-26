@@ -134,7 +134,8 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 | 6 | File sync — worker connects to nest AP and transfers logs | ✅ Complete |
 | 7 | Nest display — worker list, scan counts, file browser on CYD touch | ✅ Complete |
 | 8 | Unified worker firmware — auto-detects Worker vs Drone mode at boot | ✅ Complete |
-| 9 | WiGLE + WDGWars upload — nest connects to home WiFi and uploads | Planned |
+| 9 | Hardened file sync — 8 KB log cap, RAM pre-buffer, path validation, TCP upload | ✅ Complete |
+| 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | Planned |
 
 ---
 
@@ -276,26 +277,37 @@ packet — useful for understanding worker range.
 
 ```
 /
-├── stage1_espnow_pingpong/
-│   ├── nest/nest.ino              ← CYD: sends pings, receives pongs
-│   └── worker/worker.ino          ← C5: receives pings, replies with pongs
-├── stage2_worker_scan/
-│   └── worker/worker.ino          ← C5: dual-band WiFi + BLE scan to serial
-├── stage3_worker_gps/
-│   └── worker/worker.ino          ← C5: GPS-tagged WiFi + BLE scan to serial
-├── stage4_worker_sd/
-│   └── worker/worker.ino          ← C5: GPS-tagged scan + WiGLE CSV log to SD
-├── stage5_espnow_streaming/
-│   ├── worker/worker.ino          ← C5: Stage 4 + ESP-NOW summary packet to Nest
-│   └── nest/nest.ino              ← CYD: receives worker summaries, prints to serial
-├── stage6_file_sync/
-│   ├── worker/worker.ino          ← C5: Stage 5 + HTTP file upload to Nest AP
-│   └── nest/nest.ino              ← CYD: WiFi AP + HTTP server + SD storage
-├── stage7_nest_display/
-│   └── nest/nest.ino              ← CYD: TFT display — worker list, scan counts, heartbeat status
-└── stage8_unified/
-    └── worker/worker.ino          ← C5: unified Worker/Drone firmware, auto-detected at boot
-
+├── stage9_uploads/                ← active firmware (flash this)
+│   ├── nest/
+│   │   ├── nest.ino               ← CYD: display + AP + raw TCP upload server
+│   │   └── nest_types.h
+│   └── worker/worker.ino          ← C5: unified Worker/Drone + hardened file sync
+│
+└── learned/                       ← reference copies of all prior stages
+    ├── stage1_espnow_pingpong/
+    │   ├── nest/nest.ino
+    │   └── worker/worker.ino
+    ├── stage2_worker_scan/
+    │   ├── nest/nest.ino          ← unchanged from stage 1
+    │   └── worker/worker.ino
+    ├── stage3_worker_gps/
+    │   ├── nest/nest.ino          ← unchanged from stage 1
+    │   └── worker/worker.ino
+    ├── stage4_worker_sd/
+    │   ├── nest/nest.ino          ← unchanged from stage 1
+    │   └── worker/worker.ino
+    ├── stage5_espnow_streaming/
+    │   ├── nest/nest.ino
+    │   └── worker/worker.ino
+    ├── stage6_file_sync/
+    │   ├── nest/nest.ino
+    │   └── worker/worker.ino
+    ├── stage7_nest_display/
+    │   ├── nest/nest.ino
+    │   └── worker/worker.ino     ← unchanged from stage 6
+    └── stage8_unified/
+        ├── nest/nest.ino         ← unchanged from stage 7
+        └── worker/worker.ino
 ```
 
 ---
