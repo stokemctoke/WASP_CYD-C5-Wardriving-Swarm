@@ -33,6 +33,7 @@
  *   SD card SPI       : VSPI — CS=5  SCK=18  MISO=19  MOSI=23
  */
 
+#include "nest_types.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
@@ -193,22 +194,12 @@ static bool loadConfig() {
 #define WORKER_DISPLAY_MS  90000   // hide from display after 90 s (18 missed heartbeats)
 #define WORKER_REMOVE_MS  300000   // free registry slot after 5 min
 
-struct worker_entry_t {
-  uint8_t  mac[6];
-  uint32_t lastSeenMs;
-  uint32_t lastSummaryMs;
-  int8_t   rssi;
-  uint8_t  gpsFix;
-  uint16_t wifiTotal;
-  uint8_t  wifi2g, wifi5g;
-  uint16_t bleCount;
-  uint32_t cycleCount;
-  uint8_t  nodeType;   // 0 = worker, 1 = drone
-};
 static worker_entry_t workers[MAX_WORKERS] = {};
 
 static bool sdOk = false;
 static char lastSyncStr[48] = "none";
+
+static portMUX_TYPE gLock = portMUX_INITIALIZER_UNLOCKED;
 
 TFT_eSPI  tft = TFT_eSPI();
 SPIClass  sdSpi(VSPI);
@@ -250,8 +241,10 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
              info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
     Serial.printf("[NEST] Worker connected: %s\n", mac);
     // Refresh registry timeout — worker is alive, just syncing over WiFi
+    taskENTER_CRITICAL(&gLock);
     int idx = findWorker(info.wifi_ap_staconnected.mac);
     if (idx >= 0) workers[idx].lastSeenMs = millis();
+    taskEXIT_CRITICAL(&gLock);
   } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
     Serial.println("[NEST] Worker disconnected");
   }
@@ -270,6 +263,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     // extended fields present only in stage9+ firmware
     bool ext         = (len >= (int)sizeof(heartbeat_t));
 
+    taskENTER_CRITICAL(&gLock);
     int idx = findOrAddWorker(pkt->workerMac);
     uint32_t ago = 0;
     if (idx >= 0) {
@@ -279,6 +273,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       workers[idx].nodeType   = nodeType;
     }
     int inRange = countActiveWorkers();
+    taskEXIT_CRITICAL(&gLock);
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              pkt->workerMac[0], pkt->workerMac[1], pkt->workerMac[2],
              pkt->workerMac[3], pkt->workerMac[4], pkt->workerMac[5]);
@@ -294,6 +289,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (data[0] != WASP_PKT_SUMMARY || len < 36) return;  // 36 = v1 minimum (stage8)
 
   const scan_summary_t* pkt = (const scan_summary_t*)data;
+  taskENTER_CRITICAL(&gLock);
   int idx = findOrAddWorker(pkt->workerMac);
   if (idx >= 0) {
     workers[idx].lastSeenMs    = millis();
@@ -307,6 +303,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     workers[idx].cycleCount    = pkt->cycleCount;
   }
   int inRange = countActiveWorkers();
+  taskEXIT_CRITICAL(&gLock);
 
   snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
            pkt->workerMac[0], pkt->workerMac[1], pkt->workerMac[2],
@@ -333,7 +330,7 @@ static void handleRawUpload() {
   WiFiClient client = rawServer.accept();
   if (!client) return;
 
-  client.setTimeout(5000);
+  client.setTimeout(15000);
   String hdr = client.readStringUntil('\n');
   hdr.trim();
 
@@ -366,16 +363,18 @@ static void handleRawUpload() {
 
   client.println("READY");  // tell worker we're open and ready for data
 
-  uint8_t buf[256];
-  int    remaining = fileSize;
-  size_t written   = 0;
-  while (remaining > 0 && client.connected()) {
-    int    toRead = min(remaining, (int)sizeof(buf));
-    int    n      = client.readBytes(buf, toRead);
-    if (n <= 0) break;
-    written   += f.write(buf, n);
-    remaining -= n;
-    yield();  // feed watchdog — SD writes block the main task
+  uint8_t  buf[4096];
+  int      remaining = fileSize;
+  size_t   written   = 0;
+  uint32_t deadline  = millis() + 30000;
+  while (remaining > 0 && client.connected() && millis() < deadline) {
+    int n = client.read(buf, min(remaining, (int)sizeof(buf)));
+    if (n > 0) {
+      written   += f.write(buf, n);
+      remaining -= n;
+    } else {
+      yield();  // no data yet — give WiFi stack CPU time so ACKs go out promptly
+    }
   }
   f.close();
 
@@ -391,7 +390,9 @@ static void handleRawUpload() {
   client.println("OK");
   client.stop();
 
+  taskENTER_CRITICAL(&gLock);
   snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)written);
+  taskEXIT_CRITICAL(&gLock);
   Serial.printf("[NEST] Saved %s (%u bytes)\n", path.c_str(), (unsigned)written);
 }
 
@@ -425,7 +426,9 @@ static void handleUpload() {
   f.print(body);
   f.close();
 
+  taskENTER_CRITICAL(&gLock);
   snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), body.length());
+  taskEXIT_CRITICAL(&gLock);
   Serial.printf("[NEST] Saved %s (%d bytes)\n", path.c_str(), body.length());
   server.send(200, "text/plain", "OK");
 }
@@ -519,7 +522,19 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
 }
 
 static void refreshDisplay() {
-  int active = countActiveWorkers();
+  // Snapshot shared state under spinlock — draw takes ~50 ms, far too long to hold
+  worker_entry_t snap[MAX_WORKERS];
+  char syncSnap[sizeof(lastSyncStr)];
+  taskENTER_CRITICAL(&gLock);
+  memcpy(snap, workers, sizeof(snap));
+  memcpy(syncSnap, lastSyncStr, sizeof(syncSnap));
+  taskEXIT_CRITICAL(&gLock);
+
+  uint32_t now = millis();
+  int active = 0;
+  for (int i = 0; i < MAX_WORKERS; i++)
+    if (snap[i].lastSeenMs > 0 && (now - snap[i].lastSeenMs) < WORKER_TIMEOUT_MS) active++;
+
   tft.fillRect(0, HEADER_H, 240, STATUS_H, CLR_BG);
   tft.setTextFont(2);
   tft.setTextDatum(ML_DATUM);
@@ -528,11 +543,10 @@ static void refreshDisplay() {
   snprintf(buf, sizeof(buf), "Workers in range: %d", active);
   tft.drawString(buf, 6, HEADER_H + STATUS_H / 2);
 
-  uint32_t now = millis();
   int row = 0;
   for (int i = 0; i < MAX_WORKERS && row < MAX_ROWS; i++) {
-    if (workers[i].lastSeenMs > 0 && (now - workers[i].lastSeenMs) < WORKER_DISPLAY_MS)
-      drawWorkerRow(row++, workers[i]);
+    if (snap[i].lastSeenMs > 0 && (now - snap[i].lastSeenMs) < WORKER_DISPLAY_MS)
+      drawWorkerRow(row++, snap[i]);
   }
   for (; row < MAX_ROWS; row++) {
     int y = HEADER_H + STATUS_H + row * ROW_H;
@@ -545,7 +559,7 @@ static void refreshDisplay() {
   tft.setTextColor(CLR_LABEL, CLR_FTR_BG);
   tft.setTextDatum(ML_DATUM);
   char fbuf[52];
-  snprintf(fbuf, sizeof(fbuf), "Last sync: %s", lastSyncStr);
+  snprintf(fbuf, sizeof(fbuf), "Last sync: %s", syncSnap);
   tft.drawString(fbuf, 6, fy + FOOTER_H / 2);
 }
 
@@ -554,14 +568,28 @@ static void refreshDisplay() {
 static void cleanRegistry() {
   uint32_t now = millis();
   for (int i = 0; i < MAX_WORKERS; i++) {
-    if (workers[i].lastSeenMs == 0) continue;
-    if ((now - workers[i].lastSeenMs) < WORKER_REMOVE_MS) continue;
+    taskENTER_CRITICAL(&gLock);
+    bool expired = workers[i].lastSeenMs > 0 &&
+                   (now - workers[i].lastSeenMs) >= WORKER_REMOVE_MS;
+    uint8_t macB[6];
+    if (expired) { memcpy(macB, workers[i].mac, 6); memset(&workers[i], 0, sizeof(workers[i])); }
+    taskEXIT_CRITICAL(&gLock);
+    if (!expired) continue;
     char mac[18];
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             workers[i].mac[0], workers[i].mac[1], workers[i].mac[2],
-             workers[i].mac[3], workers[i].mac[4], workers[i].mac[5]);
+             macB[0], macB[1], macB[2], macB[3], macB[4], macB[5]);
     Serial.printf("[NEST] Worker %s expired — slot freed\n", mac);
-    memset(&workers[i], 0, sizeof(workers[i]));
+  }
+}
+
+// ── Upload task (Core 0) ──────────────────────────────────────────────────────
+// Runs alongside the WiFi stack so TCP/SD work doesn't block the display tick.
+
+static void uploadTask(void*) {
+  for (;;) {
+    server.handleClient();
+    handleRawUpload();
+    vTaskDelay(1);
   }
 }
 
@@ -630,6 +658,8 @@ void setup() {
   Serial.println(" Raw upload server started (port 8080)");
   Serial.println(" Ready — waiting for workers\n");
 
+  xTaskCreatePinnedToCore(uploadTask, "upload", 8192, NULL, 5, NULL, 0);
+
   tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
   refreshDisplay();
 }
@@ -637,9 +667,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────────────────────
 
 void loop() {
-  server.handleClient();
-  handleRawUpload();
-
+  // upload task runs on Core 0 — loop() handles display and housekeeping only
   static uint32_t lastRefresh = 0;
   static uint32_t lastClean   = 0;
   uint32_t now = millis();

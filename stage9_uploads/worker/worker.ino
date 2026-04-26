@@ -1,6 +1,6 @@
 /*
  * W.A.S.P. — Unified Worker / Drone Firmware — Stage 9
- * Board: Seeed XIAO ESP32-C5 (on Xiao Expansion Dev board or bare)
+ * Board: Seeed XIAO ESP32-C5 (on Xiao Expansion dev board)
  *
  * One firmware, two modes — auto-detected at boot:
  *
@@ -594,7 +594,7 @@ static void syncFiles() {
           int rem = sz;
           uint32_t wDeadline = millis() + 30000;
           while (rem > 0 && tcp.connected() && millis() < wDeadline) {
-            int toSend = min(rem, 1460);  // one MTU segment — avoids WiFi TX buffer exhaustion
+            int toSend = min(rem, 1460);  // one TCP segment (MTU) — each write maps to one IP packet
             int w = tcp.write(ptr, toSend);
             if (w > 0) { ptr += w; sent += w; rem -= w; }
             else if (w < 0) break;
