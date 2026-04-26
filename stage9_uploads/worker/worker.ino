@@ -336,6 +336,10 @@ static void logBLERow(const String& mac, const String& name, int rssi,
 
 // ── RAM buffer helpers (drone mode) ───────────────────────────────────────────
 
+// Used by commitCycle() before its definition below — explicit forward decl
+// rather than relying on Arduino IDE's implicit top-level prototype generator.
+static int countUnuploaded();
+
 static void clearPending() {
   pendingWifiCount = 0;
   pendingBleCount  = 0;
@@ -361,6 +365,7 @@ static void commitCycle() {
 }
 
 static int countUnuploaded() {
+  if (!cycleBuffer) return 0;  // worker mode never allocates this buffer
   int n = 0;
   for (int i = 0; i < CYCLE_SLOTS; i++)
     if (cycleBuffer[i].used && !cycleBuffer[i].uploaded) n++;
@@ -841,7 +846,7 @@ void setup() {
   delay(1000);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. — Stage 8  Unified Firmware");
+  Serial.println(" W.A.S.P. — Stage 9  Unified Firmware");
   Serial.println("========================================");
 
   gpsSerial.setRxBufferSize(512);
@@ -875,6 +880,14 @@ void setup() {
     cycleBuffer = (cycle_slot_t*)calloc(CYCLE_SLOTS, sizeof(cycle_slot_t));
     pendingWifi = (wifi_entry_t*)malloc(MAX_WIFI_PER_SLOT * sizeof(wifi_entry_t));
     pendingBle  = (ble_entry_t*)malloc(MAX_BLE_PER_SLOT  * sizeof(ble_entry_t));
+    if (!cycleBuffer || !pendingWifi || !pendingBle) {
+      // Fail loud, fail fast: a silent NULL deref 30 s later inside a scan
+      // would be harder to diagnose than a clean reboot here.
+      Serial.printf("\n[FATAL] Drone-mode buffer alloc failed (free heap=%u). Rebooting in 2s...\n",
+                    (unsigned)ESP.getFreeHeap());
+      delay(2000);
+      ESP.restart();
+    }
   }
 
   // ── Mode banner ──────────────────────────────────────────────────────────────
