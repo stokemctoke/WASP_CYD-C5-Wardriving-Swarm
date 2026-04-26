@@ -117,6 +117,15 @@ typedef struct __attribute__((packed)) {
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
 #define HEARTBEAT_INTERVAL_MS 5000
 
+// ── Log file size cap ─────────────────────────────────────────────────────────
+// The C5's TCP send path stalls on payloads above ~9.5 KB (observed ceiling
+// during live testing). Cap is set well below that threshold so that even a
+// file that gets one final row written after the rotation check triggers stays
+// safely under the reliable limit. Files already on the SD that exceed this
+// cap are renamed .toobig and skipped; they can be recovered via chunked
+// upload (Stage 10) or by reading the SD card directly on a PC.
+#define MAX_LOG_BYTES 8192
+
 // ── RAM buffer (drone mode) ───────────────────────────────────────────────────
 #define CYCLE_SLOTS        25
 #define MAX_WIFI_PER_SLOT  40
@@ -258,6 +267,16 @@ static void flushLog() {
 
 static void maybeFlush() {
   if (++linesSinceFlush >= 25 || (millis() - lastFlushMs) >= 2000) flushLog();
+  // Rotate to a new log file once we cross the size cap. The current row has
+  // already been written to the open file; the next row will land in the new
+  // one. Files stay self-contained CSVs because openLogFile() rewrites the
+  // WigleWifi-1.6 header for each new file.
+  if (logFile && (int)logFile.size() >= MAX_LOG_BYTES) {
+    Serial.printf("[SD] Rotating log: %s reached %u B (cap %d)\n",
+                  logPath.c_str(), (unsigned)logFile.size(), MAX_LOG_BYTES);
+    logFile.close();
+    openLogFile();
+  }
 }
 
 static String newLogPath() {
@@ -336,6 +355,10 @@ static void logBLERow(const String& mac, const String& name, int rssi,
 
 // ── RAM buffer helpers (drone mode) ───────────────────────────────────────────
 
+// Used by commitCycle() before its definition below — explicit forward decl
+// rather than relying on Arduino IDE's implicit top-level prototype generator.
+static int countUnuploaded();
+
 static void clearPending() {
   pendingWifiCount = 0;
   pendingBleCount  = 0;
@@ -361,6 +384,7 @@ static void commitCycle() {
 }
 
 static int countUnuploaded() {
+  if (!cycleBuffer) return 0;  // worker mode never allocates this buffer
   int n = 0;
   for (int i = 0; i < CYCLE_SLOTS; i++)
     if (cycleBuffer[i].used && !cycleBuffer[i].uploaded) n++;
@@ -538,6 +562,18 @@ static void syncFiles() {
       dir.close();
       if (!found) break;
       path = name.startsWith("/") ? name : "/logs/" + name;
+    }
+
+    // ── Set aside files that exceed the C5's reliable upload size ───────────
+    // These would either OOM on the malloc below or stall partway through TCP
+    // send (the 4380-byte symptom). Renaming to .toobig stops the sync loop
+    // from tripping over them every cycle; data is preserved on the SD card
+    // for offline recovery.
+    if (sz > MAX_LOG_BYTES) {
+      Serial.printf("[SYNC]  %-32s  %5d B  exceeds cap (%d B) — set aside as .toobig\n",
+                    name.c_str(), sz, MAX_LOG_BYTES);
+      SD.rename(path.c_str(), (path + ".toobig").c_str());
+      continue;
     }
 
     Serial.printf("[SYNC]  %-32s  %5d B  ...", name.c_str(), sz);
@@ -841,7 +877,7 @@ void setup() {
   delay(1000);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. — Stage 8  Unified Firmware");
+  Serial.println(" W.A.S.P. — Stage 9  Unified Firmware");
   Serial.println("========================================");
 
   gpsSerial.setRxBufferSize(512);
@@ -875,6 +911,14 @@ void setup() {
     cycleBuffer = (cycle_slot_t*)calloc(CYCLE_SLOTS, sizeof(cycle_slot_t));
     pendingWifi = (wifi_entry_t*)malloc(MAX_WIFI_PER_SLOT * sizeof(wifi_entry_t));
     pendingBle  = (ble_entry_t*)malloc(MAX_BLE_PER_SLOT  * sizeof(ble_entry_t));
+    if (!cycleBuffer || !pendingWifi || !pendingBle) {
+      // Fail loud, fail fast: a silent NULL deref 30 s later inside a scan
+      // would be harder to diagnose than a clean reboot here.
+      Serial.printf("\n[FATAL] Drone-mode buffer alloc failed (free heap=%u). Rebooting in 2s...\n",
+                    (unsigned)ESP.getFreeHeap());
+      delay(2000);
+      ESP.restart();
+    }
   }
 
   // ── Mode banner ──────────────────────────────────────────────────────────────

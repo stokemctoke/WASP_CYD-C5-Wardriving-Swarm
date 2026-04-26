@@ -1,13 +1,10 @@
 /*
- * NEST - Stage 9: WiGLE + WDGWars Upload
+ * NEST - Stage 7: Worker Status Display
  * Board: CYD (JC2432W328C) — standard ESP32
  *
- * Extends Stage 7 with:
- *   - wasp.cfg parser — reads credentials from SD at boot (no recompile)
- *   - Home WiFi STA connection
- *   - WiGLE and WDGWars CSV upload via REST API
- *
- * Place wasp.cfg on the Nest SD card. See wasp.cfg.example in the repo root.
+ * Extends Stage 6 with a live ILI9341 status display. Shows all workers
+ * in range: heartbeat status, RSSI, GPS fix, scan counts, file sync events.
+ * Worker firmware is unchanged from Stage 6.
  *
  * ── TFT_eSPI setup (required before first flash) ─────────────────────────────
  * Install "TFT_eSPI" by Bodmer via Library Manager.
@@ -33,7 +30,6 @@
  *   SD card SPI       : VSPI — CS=5  SCK=18  MISO=19  MOSI=23
  */
 
-#include "nest_types.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
@@ -51,6 +47,8 @@
 
 // ── Network ───────────────────────────────────────────────────────────────────
 #define ESPNOW_CHANNEL  1
+#define AP_SSID        "WASP-Nest"
+#define AP_PASS        "waspswarm"
 
 // ── Display layout (240 × 320 portrait) ──────────────────────────────────────
 // HEADER(28) + STATUS(16) + 5 × ROW(52) + FOOTER(16) = 320
@@ -76,37 +74,12 @@
 // ── Packet types ─────────────────────────────────────────────────────────────
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
-#define WASP_FIRMWARE_VER  9
-
-// ── Extended packet header (appended to both packet types) ───────────────────
-// All fields zero-filled by senders that do not yet populate them.
-// Nest never rejects a packet solely because extended fields are zero.
-//
-//  swarmId     — djb2 hash of swarm name; nest filters ESP-NOW on this
-//  loyaltyLevel— 0=wild, 255=fully loyal (drone game mechanic)
-//  gangId      — WDGWars gang affiliation (0=ungrouped)
-//  firmwareVer — sender firmware stage; for cross-swarm compat checks
-//  battLevel   — 0–100 %, 255=unknown
-//  playerLevel — rank / promotion mechanic
-//  boostLevel  — active boost / buff tier
-//  reserved    — zero-filled; reserved for future game fields
-//
-// heartbeat_t  : 8 + 16 = 24 bytes
-// scan_summary_t: 36 + 16 = 52 bytes
 
 typedef struct __attribute__((packed)) {
-  uint8_t  type;
-  uint8_t  workerMac[6];
-  uint8_t  nodeType;       // 0x00 = worker, 0x01 = drone
-  uint16_t swarmId;
-  uint8_t  loyaltyLevel;
-  uint8_t  gangId;
-  uint8_t  firmwareVer;
-  uint8_t  battLevel;
-  uint16_t playerLevel;
-  uint8_t  boostLevel;
-  uint8_t  reserved[7];
-} heartbeat_t;             // 24 bytes
+  uint8_t type;
+  uint8_t workerMac[6];
+  uint8_t nodeType;   // 0x00 = worker, 0x01 = drone — stage6 nodes send 7 bytes (no field)
+} heartbeat_t;
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -120,73 +93,7 @@ typedef struct __attribute__((packed)) {
   uint16_t bleCount;
   int8_t   bestRssi;
   uint32_t cycleCount;
-  uint16_t swarmId;
-  uint8_t  loyaltyLevel;
-  uint8_t  gangId;
-  uint8_t  firmwareVer;
-  uint8_t  battLevel;
-  uint16_t playerLevel;
-  uint8_t  boostLevel;
-  uint8_t  reserved[7];
-} scan_summary_t;          // 52 bytes
-
-// ── Config ────────────────────────────────────────────────────────────────────
-
-struct wasp_config_t {
-  char homeSsid[64];
-  char homePsk[64];
-  char apSsid[32];
-  char apPsk[32];
-  char wigleBasicToken[128];
-  char wdgwarsApiKey[72];   // 64 hex chars + null
-};
-
-static wasp_config_t cfg = {};   // zero-init; defaults applied in loadConfig()
-
-static bool loadConfig() {
-  // Defaults — overridden by wasp.cfg if present
-  strlcpy(cfg.apSsid, "WASP-Nest", sizeof(cfg.apSsid));
-  strlcpy(cfg.apPsk,  "waspswarm", sizeof(cfg.apPsk));
-
-  File f = SD.open("/wasp.cfg");
-  if (!f) {
-    Serial.println("[CFG] /wasp.cfg not found — using defaults");
-    return false;
-  }
-
-  int loaded = 0;
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.isEmpty() || line.startsWith("#")) continue;
-
-    int eq = line.indexOf('=');
-    if (eq < 1) continue;
-
-    String key = line.substring(0, eq);
-    String val = line.substring(eq + 1);
-    key.trim();
-    val.trim();
-
-    if      (key == "homeSsid")        { val.toCharArray(cfg.homeSsid,        sizeof(cfg.homeSsid));        loaded++; }
-    else if (key == "homePsk")         { val.toCharArray(cfg.homePsk,         sizeof(cfg.homePsk));         loaded++; }
-    else if (key == "apSsid")          { val.toCharArray(cfg.apSsid,          sizeof(cfg.apSsid));          loaded++; }
-    else if (key == "apPsk")           { val.toCharArray(cfg.apPsk,           sizeof(cfg.apPsk));           loaded++; }
-    else if (key == "wigleBasicToken") { val.toCharArray(cfg.wigleBasicToken, sizeof(cfg.wigleBasicToken)); loaded++; }
-    else if (key == "wdgwarsApiKey")   { val.toCharArray(cfg.wdgwarsApiKey,   sizeof(cfg.wdgwarsApiKey));   loaded++; }
-    else {
-      Serial.printf("[CFG] Unknown key ignored: %s\n", key.c_str());
-    }
-  }
-
-  f.close();
-  Serial.printf("[CFG] Loaded %d key(s) from /wasp.cfg\n", loaded);
-  Serial.printf("[CFG]   AP      : %s\n", cfg.apSsid);
-  Serial.printf("[CFG]   Home    : %s\n", cfg.homeSsid[0] ? cfg.homeSsid : "(not set)");
-  Serial.printf("[CFG]   WiGLE   : %s\n", cfg.wigleBasicToken[0] ? "token set" : "(not set)");
-  Serial.printf("[CFG]   WDGWars : %s\n", cfg.wdgwarsApiKey[0]   ? "key set"   : "(not set)");
-  return loaded > 0;
-}
+} scan_summary_t;
 
 // ── Worker registry ───────────────────────────────────────────────────────────
 #define MAX_WORKERS        8
@@ -194,17 +101,29 @@ static bool loadConfig() {
 #define WORKER_DISPLAY_MS  90000   // hide from display after 90 s (18 missed heartbeats)
 #define WORKER_REMOVE_MS  300000   // free registry slot after 5 min
 
+struct worker_entry_t {
+  uint8_t  mac[6];
+  uint32_t lastSeenMs;
+  uint32_t lastSummaryMs;
+  uint32_t lastUploadMs;    // set on successful TCP file upload
+  uint32_t lastUploadBytes;
+  int8_t   rssi;
+  uint8_t  gpsFix;
+  uint16_t wifiTotal;
+  uint8_t  wifi2g, wifi5g;
+  uint16_t bleCount;
+  uint32_t cycleCount;
+  uint8_t  nodeType;   // 0 = worker, 1 = drone
+};
 static worker_entry_t workers[MAX_WORKERS] = {};
 
 static bool sdOk = false;
 static char lastSyncStr[48] = "none";
 
-static portMUX_TYPE gLock = portMUX_INITIALIZER_UNLOCKED;
-
 TFT_eSPI  tft = TFT_eSPI();
 SPIClass  sdSpi(VSPI);
 WebServer   server(80);
-WiFiServer  rawServer(8080);
+WiFiServer  rawServer(8080);   // worker large-file uploads — streams directly to SD
 
 // ── Worker registry helpers ───────────────────────────────────────────────────
 
@@ -241,10 +160,8 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
              info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
     Serial.printf("[NEST] Worker connected: %s\n", mac);
     // Refresh registry timeout — worker is alive, just syncing over WiFi
-    taskENTER_CRITICAL(&gLock);
     int idx = findWorker(info.wifi_ap_staconnected.mac);
     if (idx >= 0) workers[idx].lastSeenMs = millis();
-    taskEXIT_CRITICAL(&gLock);
   } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
     Serial.println("[NEST] Worker disconnected");
   }
@@ -259,11 +176,9 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
 
   if (data[0] == WASP_PKT_HEARTBEAT && len >= 7) {
     const heartbeat_t* pkt = (const heartbeat_t*)data;
-    uint8_t nodeType = (len >= 8)                    ? pkt->nodeType : 0;
-    // extended fields present only in stage9+ firmware
-    bool ext         = (len >= (int)sizeof(heartbeat_t));
+    // nodeType byte present in stage8+ firmware; stage6 sends 7 bytes (no field → worker)
+    uint8_t nodeType = (len >= (int)sizeof(heartbeat_t)) ? pkt->nodeType : 0;
 
-    taskENTER_CRITICAL(&gLock);
     int idx = findOrAddWorker(pkt->workerMac);
     uint32_t ago = 0;
     if (idx >= 0) {
@@ -273,7 +188,6 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
       workers[idx].nodeType   = nodeType;
     }
     int inRange = countActiveWorkers();
-    taskEXIT_CRITICAL(&gLock);
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              pkt->workerMac[0], pkt->workerMac[1], pkt->workerMac[2],
              pkt->workerMac[3], pkt->workerMac[4], pkt->workerMac[5]);
@@ -286,10 +200,9 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     return;
   }
 
-  if (data[0] != WASP_PKT_SUMMARY || len < 36) return;  // 36 = v1 minimum (stage8)
+  if (data[0] != WASP_PKT_SUMMARY || len < (int)sizeof(scan_summary_t)) return;
 
   const scan_summary_t* pkt = (const scan_summary_t*)data;
-  taskENTER_CRITICAL(&gLock);
   int idx = findOrAddWorker(pkt->workerMac);
   if (idx >= 0) {
     workers[idx].lastSeenMs    = millis();
@@ -303,7 +216,6 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     workers[idx].cycleCount    = pkt->cycleCount;
   }
   int inRange = countActiveWorkers();
-  taskEXIT_CRITICAL(&gLock);
 
   snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
            pkt->workerMac[0], pkt->workerMac[1], pkt->workerMac[2],
@@ -322,45 +234,21 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   Serial.printf("       BLE:  %d device(s)\n", pkt->bleCount);
 }
 
-// ── Upload input validation ──────────────────────────────────────────────────
-// All upload paths take a worker MAC and a filename from the network and use
-// them directly in SD path construction. Both must be allowlisted before use,
-// or a malicious / buggy worker can write outside /logs/ via path traversal.
-
-static bool isValidMac(const String& mac) {
-  if (mac.length() != 12) return false;
-  for (unsigned int i = 0; i < mac.length(); i++) {
-    char c = mac[i];
-    if (!((c >= '0' && c <= '9') ||
-          (c >= 'a' && c <= 'f') ||
-          (c >= 'A' && c <= 'F'))) return false;
-  }
-  return true;
-}
-
-static bool isValidFilename(const String& name) {
-  if (name.isEmpty() || name.length() > 64) return false;
-  if (!name.endsWith(".csv")) return false;
-  if (name.indexOf("..") >= 0) return false;     // explicit traversal guard
-  for (unsigned int i = 0; i < name.length(); i++) {
-    char c = name[i];
-    if (!isAlphaNumeric(c) && c != '_' && c != '-' && c != '.') return false;
-  }
-  return true;
-}
-
 // ── Raw TCP upload handler (port 8080) ────────────────────────────────────────
+// Worker streams files here. Protocol: one header line then raw bytes.
 // Header: "UPLOAD <MAC_NO_COLONS> <FILENAME> <SIZE_BYTES>\n"
 // Response: "OK\n" or "ERR <reason>\n"
+// Streams body to SD in 256-byte chunks — no large heap allocation.
 
 static void handleRawUpload() {
   WiFiClient client = rawServer.accept();
   if (!client) return;
 
-  client.setTimeout(15000);
+  client.setTimeout(5000);
   String hdr = client.readStringUntil('\n');
   hdr.trim();
 
+  // parse "UPLOAD mac filename size"
   int s1 = hdr.indexOf(' ');
   int s2 = s1 > 0 ? hdr.indexOf(' ', s1 + 1) : -1;
   int s3 = s2 > 0 ? hdr.indexOf(' ', s2 + 1) : -1;
@@ -374,14 +262,7 @@ static void handleRawUpload() {
   String fileName  = hdr.substring(s2 + 1, s3);
   int    fileSize  = hdr.substring(s3 + 1).toInt();
 
-  if (!sdOk || fileSize <= 0) {
-    client.println("ERR bad params");
-    client.stop();
-    return;
-  }
-  if (!isValidMac(workerMac) || !isValidFilename(fileName)) {
-    Serial.printf("[NEST] Rejected upload: mac='%s' file='%s' (validation failed)\n",
-                  workerMac.c_str(), fileName.c_str());
+  if (!sdOk || fileSize <= 0 || fileName.isEmpty() || workerMac.isEmpty()) {
     client.println("ERR bad params");
     client.stop();
     return;
@@ -392,46 +273,23 @@ static void handleRawUpload() {
   if (!SD.exists("/logs")) SD.mkdir("/logs");
   if (!SD.exists(dir))     SD.mkdir(dir);
 
-  // Truncate any prior partial upload — Arduino's FILE_WRITE is append mode,
-  // which would silently concatenate retried uploads onto a corrupt remainder.
-  if (SD.exists(path.c_str())) SD.remove(path.c_str());
-
   File f = SD.open(path.c_str(), FILE_WRITE);
   if (!f) { client.println("ERR sd open failed"); client.stop(); return; }
 
   client.println("READY");  // tell worker we're open and ready for data
 
-  uint8_t  buf[4096];
-  int      remaining = fileSize;
-  size_t   written   = 0;
-  uint32_t deadline  = millis() + 30000;
-  bool     sdFail    = false;
-  while (remaining > 0 && client.connected() && millis() < deadline) {
-    int n = client.read(buf, min(remaining, (int)sizeof(buf)));
-    if (n > 0) {
-      size_t wrote = f.write(buf, n);
-      written += wrote;
-      if ((int)wrote < n) {
-        // SD full / removed / FAT corruption — without this check we'd happily
-        // drain the rest of the TCP stream into the void and tell the worker OK.
-        Serial.printf("[NEST] SD write short %u/%d — aborting (card full or removed?)\n",
-                      (unsigned)wrote, n);
-        sdFail = true;
-        break;
-      }
-      remaining -= n;
-    } else {
-      yield();  // no data yet — give WiFi stack CPU time so ACKs go out promptly
-    }
+  uint8_t buf[256];
+  int    remaining = fileSize;
+  size_t written   = 0;
+  while (remaining > 0 && client.connected()) {
+    int    toRead = min(remaining, (int)sizeof(buf));
+    int    n      = client.readBytes(buf, toRead);
+    if (n <= 0) break;
+    written   += f.write(buf, n);
+    remaining -= n;
+    yield();  // feed watchdog — SD writes block the main task
   }
   f.close();
-
-  if (sdFail) {
-    SD.remove(path.c_str());
-    client.println("ERR sd write failed");
-    client.stop();
-    return;
-  }
 
   Serial.printf("[NEST] recv %u/%d B for %s\n", (unsigned)written, fileSize, fileName.c_str());
 
@@ -445,10 +303,20 @@ static void handleRawUpload() {
   client.println("OK");
   client.stop();
 
-  taskENTER_CRITICAL(&gLock);
   snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), (int)written);
-  taskEXIT_CRITICAL(&gLock);
   Serial.printf("[NEST] Saved %s (%u bytes)\n", path.c_str(), (unsigned)written);
+
+  // Update worker registry so display clears "awaiting scan data..."
+  uint8_t macBytes[6] = {};
+  for (int i = 0; i < 6; i++) {
+    char hex[3] = { workerMac[i*2], workerMac[i*2+1], '\0' };
+    macBytes[i] = (uint8_t)strtol(hex, nullptr, 16);
+  }
+  int widx = findWorker(macBytes);
+  if (widx >= 0) {
+    workers[widx].lastUploadMs    = millis();
+    workers[widx].lastUploadBytes = written;
+  }
 }
 
 // ── HTTP upload handler (drone small CSV uploads) ─────────────────────────────
@@ -459,8 +327,15 @@ static void handleUpload() {
   String workerMac = server.arg("worker");
   String fileName  = server.arg("file");
 
-  if (!isValidMac(workerMac))      { server.send(400, "text/plain", "Bad worker");   return; }
-  if (!isValidFilename(fileName))  { server.send(400, "text/plain", "Bad filename"); return; }
+  for (unsigned int i = 0; i < fileName.length(); i++) {
+    char c = fileName[i];
+    if (!isAlphaNumeric(c) && c != '_' && c != '-' && c != '.') {
+      server.send(400, "text/plain", "Bad filename"); return;
+    }
+  }
+  if (fileName.isEmpty() || !fileName.endsWith(".csv")) {
+    server.send(400, "text/plain", "Filename must end in .csv"); return;
+  }
 
   String dir  = "/logs/" + workerMac;
   String path = dir + "/" + fileName;
@@ -469,24 +344,12 @@ static void handleUpload() {
   if (!SD.exists(dir))     SD.mkdir(dir);
 
   String body = server.arg("plain");
-  // Truncate prior partial upload — FILE_WRITE is append mode, which would
-  // corrupt the file by concatenating onto a previous failed transfer.
-  if (SD.exists(path.c_str())) SD.remove(path.c_str());
   File f = SD.open(path.c_str(), FILE_WRITE);
-  if (!f) { server.send(500, "text/plain", "SD open failed"); return; }
-  size_t wrote = f.print(body);
+  if (!f) { server.send(500, "text/plain", "SD write failed"); return; }
+  f.print(body);
   f.close();
-  if (wrote < body.length()) {
-    SD.remove(path.c_str());
-    Serial.printf("[NEST] SD write short %u/%u for %s\n",
-                  (unsigned)wrote, (unsigned)body.length(), path.c_str());
-    server.send(500, "text/plain", "SD write failed");
-    return;
-  }
 
-  taskENTER_CRITICAL(&gLock);
   snprintf(lastSyncStr, sizeof(lastSyncStr), "%s  %dB", workerMac.c_str(), body.length());
-  taskEXIT_CRITICAL(&gLock);
   Serial.printf("[NEST] Saved %s (%d bytes)\n", path.c_str(), body.length());
   server.send(200, "text/plain", "OK");
 }
@@ -496,16 +359,8 @@ static void handleUpload() {
 static uint16_t rssiColor(int8_t r) {
   if (r > -50) return TFT_GREEN;
   if (r > -70) return TFT_YELLOW;
-  if (r > -85) return 0xFBE0;
+  if (r > -85) return 0xFBE0;  // orange
   return TFT_RED;
-}
-
-static void drawBootMsg(const char* msg) {
-  tft.setTextFont(2);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(CLR_LABEL, CLR_BG);
-  tft.fillRect(0, HEADER_H + STATUS_H, 240, ROW_H, CLR_BG);
-  tft.drawString(msg, 120, HEADER_H + STATUS_H + ROW_H / 2);
 }
 
 // ── Display drawing ───────────────────────────────────────────────────────────
@@ -527,7 +382,7 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   int y = HEADER_H + STATUS_H + row * ROW_H;
   uint32_t age = millis() - w.lastSeenMs;
   bool active  = age < WORKER_TIMEOUT_MS;
-  bool stale   = age >= 10000 && active;
+  bool stale   = age >= 10000 && active;   // seen but quiet for 10s+
 
   bool     isDrone   = (w.nodeType == 1);
   uint16_t baseColor = isDrone ? TFT_CYAN : CLR_ACTIVE;
@@ -536,13 +391,16 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   tft.fillRect(0, y, 240, ROW_H, CLR_BG);
   tft.drawFastHLine(0, y + ROW_H - 1, 240, CLR_DIVIDER);
 
+  // Status dot — green = worker, cyan = drone, yellow = stale, grey = offline
   tft.fillCircle(8, y + 14, 5, nameColor);
 
+  // W / D type label next to dot
   tft.setTextFont(1);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(nameColor, CLR_BG);
   tft.drawString(isDrone ? "D" : "W", 16, y + 10);
 
+  // MAC address — line 1 left
   char mac[18];
   snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
            w.mac[0], w.mac[1], w.mac[2], w.mac[3], w.mac[4], w.mac[5]);
@@ -551,16 +409,24 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
   tft.setTextColor(nameColor, CLR_BG);
   tft.drawString(mac, 26, y + 14);
 
+  // RSSI — line 1 right
   char rssiStr[10];
   snprintf(rssiStr, sizeof(rssiStr), "%d dBm", w.rssi);
   tft.setTextColor(rssiColor(w.rssi), CLR_BG);
   tft.setTextDatum(MR_DATUM);
   tft.drawString(rssiStr, 234, y + 14);
 
+  // Line 2
   tft.setTextDatum(ML_DATUM);
   if (w.lastSummaryMs == 0) {
     tft.setTextColor(CLR_LABEL, CLR_BG);
-    tft.drawString("awaiting scan data...", 26, y + 38);
+    if (w.lastUploadMs > 0) {
+      char upStr[28];
+      snprintf(upStr, sizeof(upStr), "synced  %luB", w.lastUploadBytes);
+      tft.drawString(upStr, 26, y + 38);
+    } else {
+      tft.drawString("awaiting scan data...", 26, y + 38);
+    }
     return;
   }
 
@@ -580,19 +446,8 @@ static void drawWorkerRow(int row, const worker_entry_t& w) {
 }
 
 static void refreshDisplay() {
-  // Snapshot shared state under spinlock — draw takes ~50 ms, far too long to hold
-  worker_entry_t snap[MAX_WORKERS];
-  char syncSnap[sizeof(lastSyncStr)];
-  taskENTER_CRITICAL(&gLock);
-  memcpy(snap, workers, sizeof(snap));
-  memcpy(syncSnap, lastSyncStr, sizeof(syncSnap));
-  taskEXIT_CRITICAL(&gLock);
-
-  uint32_t now = millis();
-  int active = 0;
-  for (int i = 0; i < MAX_WORKERS; i++)
-    if (snap[i].lastSeenMs > 0 && (now - snap[i].lastSeenMs) < WORKER_TIMEOUT_MS) active++;
-
+  // Status bar
+  int active = countActiveWorkers();
   tft.fillRect(0, HEADER_H, 240, STATUS_H, CLR_BG);
   tft.setTextFont(2);
   tft.setTextDatum(ML_DATUM);
@@ -601,23 +456,26 @@ static void refreshDisplay() {
   snprintf(buf, sizeof(buf), "Workers in range: %d", active);
   tft.drawString(buf, 6, HEADER_H + STATUS_H / 2);
 
+  // Worker rows — only show workers seen within WORKER_DISPLAY_MS
+  uint32_t now = millis();
   int row = 0;
   for (int i = 0; i < MAX_WORKERS && row < MAX_ROWS; i++) {
-    if (snap[i].lastSeenMs > 0 && (now - snap[i].lastSeenMs) < WORKER_DISPLAY_MS)
-      drawWorkerRow(row++, snap[i]);
+    if (workers[i].lastSeenMs > 0 && (now - workers[i].lastSeenMs) < WORKER_DISPLAY_MS)
+      drawWorkerRow(row++, workers[i]);
   }
   for (; row < MAX_ROWS; row++) {
     int y = HEADER_H + STATUS_H + row * ROW_H;
     tft.fillRect(0, y, 240, ROW_H, CLR_BG);
   }
 
+  // Footer — last sync event
   int fy = 320 - FOOTER_H;
   tft.fillRect(0, fy, 240, FOOTER_H, CLR_FTR_BG);
   tft.setTextFont(1);
   tft.setTextColor(CLR_LABEL, CLR_FTR_BG);
   tft.setTextDatum(ML_DATUM);
   char fbuf[52];
-  snprintf(fbuf, sizeof(fbuf), "Last sync: %s", syncSnap);
+  snprintf(fbuf, sizeof(fbuf), "Last sync: %s", lastSyncStr);
   tft.drawString(fbuf, 6, fy + FOOTER_H / 2);
 }
 
@@ -626,28 +484,14 @@ static void refreshDisplay() {
 static void cleanRegistry() {
   uint32_t now = millis();
   for (int i = 0; i < MAX_WORKERS; i++) {
-    taskENTER_CRITICAL(&gLock);
-    bool expired = workers[i].lastSeenMs > 0 &&
-                   (now - workers[i].lastSeenMs) >= WORKER_REMOVE_MS;
-    uint8_t macB[6];
-    if (expired) { memcpy(macB, workers[i].mac, 6); memset(&workers[i], 0, sizeof(workers[i])); }
-    taskEXIT_CRITICAL(&gLock);
-    if (!expired) continue;
+    if (workers[i].lastSeenMs == 0) continue;
+    if ((now - workers[i].lastSeenMs) < WORKER_REMOVE_MS) continue;
     char mac[18];
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             macB[0], macB[1], macB[2], macB[3], macB[4], macB[5]);
+             workers[i].mac[0], workers[i].mac[1], workers[i].mac[2],
+             workers[i].mac[3], workers[i].mac[4], workers[i].mac[5]);
     Serial.printf("[NEST] Worker %s expired — slot freed\n", mac);
-  }
-}
-
-// ── Upload task (Core 0) ──────────────────────────────────────────────────────
-// Runs alongside the WiFi stack so TCP/SD work doesn't block the display tick.
-
-static void uploadTask(void*) {
-  for (;;) {
-    server.handleClient();
-    handleRawUpload();
-    vTaskDelay(1);
+    memset(&workers[i], 0, sizeof(workers[i]));
   }
 }
 
@@ -658,21 +502,26 @@ void setup() {
   delay(500);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. Nest — Stage 9");
-  Serial.println(" ESP-NOW + WiFi AP + File Sync + Display + Upload");
+  Serial.println(" W.A.S.P. Nest — Stage 7");
+  Serial.println(" ESP-NOW + WiFi AP + File Sync + Display");
   Serial.println("========================================");
 
+  // Backlight on
   pinMode(TFT_BACKLIGHT, OUTPUT);
   digitalWrite(TFT_BACKLIGHT, HIGH);
 
+  // Display — boot screen while initialising
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(CLR_BG);
   drawHeader();
+  tft.setTextFont(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(CLR_LABEL, CLR_BG);
+  tft.drawString("Initialising...", 120, 160);
 
-  // SD — must come before loadConfig()
+  // SD — VSPI (separate bus from display)
   sdSpi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  drawBootMsg("SD...");
   if (SD.begin(SD_CS, sdSpi)) {
     sdOk = true;
     if (!SD.exists("/logs")) SD.mkdir("/logs");
@@ -681,23 +530,18 @@ void setup() {
     Serial.println(" SD FAIL — uploads will be rejected");
   }
 
-  // Config — read from SD before any network setup
-  drawBootMsg("Reading config...");
-  loadConfig();
-
-  // WiFi — AP uses credentials from config
-  drawBootMsg("WiFi...");
+  // WiFi — AP_STA keeps STA MAC alive for ESP-NOW
   WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_AP_STA);
   delay(100);
   String staMac = WiFi.macAddress();
-  WiFi.softAP(cfg.apSsid, cfg.apPsk, ESPNOW_CHANNEL);
+  WiFi.softAP(AP_SSID, AP_PASS, ESPNOW_CHANNEL);
   delay(100);
 
   Serial.printf(" STA MAC: %s  (ESP-NOW peer address for workers)\n", staMac.c_str());
   Serial.printf(" AP  MAC: %s\n", WiFi.softAPmacAddress().c_str());
   Serial.printf(" AP: %-12s  IP: %s  ch: %d\n",
-                cfg.apSsid, WiFi.softAPIP().toString().c_str(), ESPNOW_CHANNEL);
+                AP_SSID, WiFi.softAPIP().toString().c_str(), ESPNOW_CHANNEL);
 
   // ESP-NOW
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -708,7 +552,7 @@ void setup() {
     Serial.printf(" ESP-NOW ready on channel %d\n", ESPNOW_CHANNEL);
   }
 
-  // HTTP servers
+  // HTTP server
   server.on("/upload", HTTP_POST, handleUpload);
   server.begin();
   rawServer.begin();
@@ -716,8 +560,7 @@ void setup() {
   Serial.println(" Raw upload server started (port 8080)");
   Serial.println(" Ready — waiting for workers\n");
 
-  xTaskCreatePinnedToCore(uploadTask, "upload", 8192, NULL, 5, NULL, 0);
-
+  // Clear boot message, draw initial display state
   tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
   refreshDisplay();
 }
@@ -725,7 +568,9 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────────────────────
 
 void loop() {
-  // upload task runs on Core 0 — loop() handles display and housekeeping only
+  server.handleClient();
+  handleRawUpload();
+
   static uint32_t lastRefresh = 0;
   static uint32_t lastClean   = 0;
   uint32_t now = millis();
