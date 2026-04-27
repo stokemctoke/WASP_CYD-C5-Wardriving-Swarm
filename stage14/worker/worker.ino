@@ -898,7 +898,11 @@ static void syncFiles() {
   // Previously we connected/disconnected per file (and per chunk!), burning
   // ~5 s of WiFi handshake overhead on every transfer. One association is
   // enough — TCP sockets are cheap to open over an existing WiFi link.
+  // nestAttempted tracks whether connectToNest() was called so we always
+  // call disconnectFromNest() to restore ESP-NOW even on a failed connect.
+  bool nestAttempted = false;
   if (queueLen > 0) {
+    nestAttempted = true;
     if (!connectToNest()) {
       Serial.println("[SYNC] Nest WiFi unreachable — aborting sync");
       // Fall through to deferred-restore + log-reopen at the end of syncFiles().
@@ -1023,7 +1027,9 @@ static void syncFiles() {
   }
 
   // ── Disconnect from nest ONCE after all files attempted ────────────────────
-  if (WiFi.status() == WL_CONNECTED) disconnectFromNest();
+  // Always call disconnectFromNest() if we called connectToNest() — it re-inits
+  // ESP-NOW and clears the WiFi STA state so subsequent scans work correctly.
+  if (nestAttempted) disconnectFromNest();
 
   // ── Restore deferred files for retry next sync ───────────────────────────
   {
