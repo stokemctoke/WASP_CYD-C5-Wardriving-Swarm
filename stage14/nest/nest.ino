@@ -409,6 +409,7 @@ static bool uploadFileToWigle(const String& path, const String& fileName) {
   http.addHeader("Content-Type",   String("multipart/form-data; boundary=") + boundary);
   http.addHeader("Accept",         "application/json");
   http.setTimeout(20000);
+  Serial.printf("[WIGLE] Uploading %s (%d B)...\n", fileName.c_str(), total);
   int code = http.POST(body, total);
   if (code != 200) Serial.printf("[WIGLE] resp: %s\n", http.getString().c_str());
   http.end(); free(body);
@@ -450,6 +451,7 @@ static bool uploadFileToWdgwars(const String& path, const String& fileName) {
   http.addHeader("Content-Type", String("multipart/form-data; boundary=") + boundary);
   http.addHeader("Accept",       "application/json");
   http.setTimeout(20000);
+  Serial.printf("[WDG] Uploading %s (%d B)...\n", fileName.c_str(), total);
   int code = http.POST(body, total);
   if (code != 200) Serial.printf("[WDG] resp: %s\n", http.getString().c_str());
   http.end(); free(body);

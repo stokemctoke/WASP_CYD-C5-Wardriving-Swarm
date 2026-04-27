@@ -867,30 +867,39 @@ static void syncFiles() {
   // SD+WiFi DMA coexistence on the ESP32-C5 is unreliable mid-transfer:
   // f.read() hangs after the first chunk once the WiFi stack is active.
   // Fix: read the whole file into RAM while WiFi is OFF, then connect and
-  // stream from the buffer. OOM files are deferred and retried after 25
-  // scan cycles once the heap has settled.
-  for (int pass = 0; pass < 200; pass++) {
-
-    // ── Find next pending .csv (WiFi off, SD safe) ──────────────────────────
-    String name, path;
-    int sz = 0;
-    {
-      File dir = SD.open("/logs");
-      if (!dir) break;
-      bool found = false;
-      while (true) {
+  // stream from the buffer. OOM files are deferred and retried next sync.
+  //
+  // Scan /logs/ once upfront — avoids re-walking all .done entries on every
+  // file (O(n) not O(n²) when many completed files accumulate on the card).
+  const int MAX_QUEUE = 100;
+  String queueName[MAX_QUEUE];
+  int    queueSize[MAX_QUEUE];
+  int    queueLen = 0;
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (queueLen < MAX_QUEUE) {
         File entry = dir.openNextFile();
         if (!entry) break;
         String n = String(entry.name());
-        bool   d = entry.isDirectory();
-        int    s = (int)entry.size();
+        bool d = entry.isDirectory();
+        int s = (int)entry.size();
         entry.close();
-        if (!d && n.endsWith(".csv") && s > 0) { name = n; sz = s; found = true; break; }
+        if (!d && n.endsWith(".csv") && s > 0) {
+          queueName[queueLen] = n;
+          queueSize[queueLen] = s;
+          queueLen++;
+        }
       }
       dir.close();
-      if (!found) break;
-      path = name.startsWith("/") ? name : "/logs/" + name;
     }
+  }
+  Serial.printf("[SYNC] %d file(s) queued\n", queueLen);
+
+  for (int qi = 0; qi < queueLen; qi++) {
+    String name = queueName[qi];
+    int    sz   = queueSize[qi];
+    String path = name.startsWith("/") ? name : "/logs/" + name;
 
     // ── Route by size: small → single-shot, large → chunked ─────────────────
     if (sz > maxLogBytes) {
