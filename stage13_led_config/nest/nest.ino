@@ -270,12 +270,12 @@ struct LedEvent {
   int      offMs;
 };
 
-static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 };
-static LedEvent evNestHeartbeat  = { 0xFF00FF, 2,  80,  80 };
-static LedEvent evNestChunk      = { 0x0000FF, 1,  80,   0 };
-static LedEvent evNestUploadAct  = { 0x00FFFF, 0,   0,   0 }; // solid while uploading
-static LedEvent evNestUploadOK   = { 0x00FF00, 2, 200, 200 };
-static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 };
+static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 }; // white   — startup / config loaded
+static LedEvent evNestHeartbeat  = { 0xFF69B4, 2,  80,  80 }; // pink    — heartbeat / idle
+static LedEvent evNestChunk      = { 0x0050FF, 1,  80,   0 }; // blue    — receiving chunk from worker
+static LedEvent evNestUploadAct  = { 0xFF00B4, 0,   0,   0 }; // magenta — solid while uploading
+static LedEvent evNestUploadOK   = { 0x64FF00, 2, 200, 200 }; // lime    — upload success
+static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 }; // red     — upload failed
 
 static void nestLedFlashEvent(const LedEvent& ev) {
   bool r = ((ev.colour >> 16) & 0xFF) > 0;

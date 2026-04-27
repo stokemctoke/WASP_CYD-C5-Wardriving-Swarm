@@ -50,16 +50,16 @@
  *   ledBrightness=40     (0–255)
  *   ledType=ws2812       (ws2812 or rgb4pin)
  *   ledBoot=FFFFFF,3,50,50                  (colour hex, flashes, onMs, offMs)
- *   ledGPSAcquire=FAA307,0,400,400          (0 flashes = continuous toggle)
- *   ledGPSFound=FAA307,4,400,300            (one-off burst after module confirmed)
- *   ledGPSFix=00FFFF,2,150,100
- *   ledScanCycle=FFFF00,1,100,0
- *   ledConnecting=4488FF,0,200,200          (0 flashes = continuous toggle)
+ *   ledGPSAcquire=FF3C00,0,400,400          (0 flashes = continuous toggle)
+ *   ledGPSFound=64FF00,4,400,300            (one-off burst after module confirmed)
+ *   ledGPSFix=64FF00,2,150,100
+ *   ledScanCycle=FFDC00,1,100,0
+ *   ledConnecting=FF6400,0,200,200          (0 flashes = continuous toggle)
  *   ledSyncOK=00FF00,2,150,100
  *   ledSyncFail=FF0000,3,80,80
- *   ledTooBig=FF6600,4,80,80
+ *   ledTooBig=FF6400,4,80,80
  *   ledLowHeap=FF0000,1,400,0
- *   ledDronePulse=00FFFF,2,200,100
+ *   ledDronePulse=0050FF,2,200,100
  *   ledHeartbeat=FF69B4,2,80,80
  */
 
@@ -242,18 +242,18 @@ static bool    gpsFired      = false;
 
 // Default values match the hardcoded behaviour from prior stages.
 // All overrideable via worker.cfg: ledBoot=RRGGBB,flashes,onMs,offMs
-static LedEvent evBoot       = { 0xFFFFFF, 3,   50,  50 };
-static LedEvent evGPSAcquire = { 0xFAA307, 0,  400, 400 }; // 0 = continuous toggle
-static LedEvent evGPSFound   = { 0xFAA307, 4,  400, 300 }; // prominent one-off after module confirmed
-static LedEvent evGPSFix     = { 0x00FFFF, 2,  150, 100 };
-static LedEvent evScanCycle  = { 0xFFFF00, 1,  100,   0 };
-static LedEvent evConnecting = { 0x4488FF, 0,  200, 200 }; // 0 = continuous toggle
-static LedEvent evSyncOK     = { 0x00FF00, 2,  150, 100 };
-static LedEvent evSyncFail   = { 0xFF0000, 3,   80,  80 };
-static LedEvent evTooBig     = { 0xFF6600, 4,   80,  80 };
-static LedEvent evLowHeap    = { 0xFF0000, 1,  400,   0 };
-static LedEvent evDronePulse = { 0x00FFFF, 2,  200, 100 };
-static LedEvent evHeartbeat  = { 0xFF69B4, 2,   80,  80 };
+static LedEvent evBoot       = { 0xFFFFFF, 3,   50,  50 }; // white  — startup / config loaded
+static LedEvent evGPSAcquire = { 0xFF3C00, 0,  400, 400 }; // amber  — acquiring GPS, no fix (continuous)
+static LedEvent evGPSFound   = { 0x64FF00, 4,  400, 300 }; // lime   — GPS fix first acquired
+static LedEvent evGPSFix     = { 0x64FF00, 2,  150, 100 }; // lime   — GPS has fix
+static LedEvent evScanCycle  = { 0xFFDC00, 1,  100,   0 }; // yellow — new network / scan cycle
+static LedEvent evConnecting = { 0xFF6400, 0,  200, 200 }; // orange — WiFi connecting (continuous)
+static LedEvent evSyncOK     = { 0x00FF00, 2,  150, 100 }; // green  — sync / WiFi OK
+static LedEvent evSyncFail   = { 0xFF0000, 3,   80,  80 }; // red    — sync failed
+static LedEvent evTooBig     = { 0xFF6400, 4,   80,  80 }; // orange — file too big
+static LedEvent evLowHeap    = { 0xFF0000, 1,  400,   0 }; // red    — low heap
+static LedEvent evDronePulse = { 0x0050FF, 2,  200, 100 }; // blue   — drone connection pulse
+static LedEvent evHeartbeat  = { 0xFF69B4, 2,   80,  80 }; // pink   — heartbeat / idle
 
 Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 

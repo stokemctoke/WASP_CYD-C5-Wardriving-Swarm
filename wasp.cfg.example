@@ -19,9 +19,9 @@ wdgwarsApiKey=0000000000000000000000000000000000000000000000000000000000000000
 # Nest LED event colours and timing — format: RRGGBB,flashes,onMs,offMs
 # Omit any line to keep the compiled-in default. flashes=0 = solid on.
 # Colours are binary on the CYD onboard LED (non-zero channel = on, no PWM).
-#nestLedBoot=FFFFFF,3,50,50
-#nestLedHeartbeat=FF00FF,2,80,80
-#nestLedChunk=0000FF,1,80,0
-#nestLedUploadAct=00FFFF,0,0,0
-#nestLedUploadOK=00FF00,2,200,200
-#nestLedUploadFail=FF0000,3,200,200
+#nestLedBoot=FFFFFF,3,50,50       # white   — startup / config loaded
+#nestLedHeartbeat=FF69B4,2,80,80  # pink    — heartbeat / idle
+#nestLedChunk=0050FF,1,80,0       # blue    — receiving chunk from worker
+#nestLedUploadAct=FF00B4,0,0,0    # magenta — solid while uploading
+#nestLedUploadOK=64FF00,2,200,200 # lime    — upload success
+#nestLedUploadFail=FF0000,3,200,200 # red   — upload failed
