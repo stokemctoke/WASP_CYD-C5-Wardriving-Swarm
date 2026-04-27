@@ -126,6 +126,36 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 
 ---
 
+## LED Status Flash Codes
+
+### Worker (WS2812/SK6812 on D0 / GPIO 3)
+
+| State | Colour | Pattern |
+|---|---|---|
+| Boot / power-on | White | 3× quick flash (50 ms each) |
+| GPS acquiring | Amber `#FAA307` | Slow pulse — 800 ms on / 800 ms off |
+| GPS fix acquired | Cyan `#00FFFF` | 2× flash |
+| Scan cycle start | Yellow `#FFFF00` | 1× flash (100 ms) |
+| Connecting to Nest AP | Blue `#4488FF` | Fast blink (200 ms) |
+| Sync success | Green `#00FF00` | 2× flash |
+| Sync fail / nest unreachable | Red `#FF0000` | 3× fast flash |
+| Chunked upload failed (file → .defer) | Orange `#FF6600` | 4× fast flash |
+| Low heap warning | Red `#FF0000` | 1× slow pulse (400 ms) |
+
+Brightness and on/off are set per-worker in `/worker.cfg` on the worker SD card (`ledBrightness=40`, `ledEnabled=true`). See `worker.cfg.example`.
+
+### Nest (onboard RGB LED — active LOW, GPIOs 4 / 16 / 17)
+
+| State | Colour | Pattern |
+|---|---|---|
+| Boot / power-on | White (R+G+B) | 3× quick flash (50 ms each) |
+| Worker heartbeat received | Green | 1× brief flash (50 ms) |
+| File chunk / sync received | Blue | 1× flash (80 ms) per chunk |
+
+> GPIO 4 (red channel) is shared with `TFT_RST` in `TFT_eSPI`'s `User_Setup.h`. It is reclaimed as a plain output immediately after `tft.init()` completes — the reset pulse only fires once at startup.
+
+---
+
 ## Build Stages
 
 | Stage | Description | Status |
