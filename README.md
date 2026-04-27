@@ -6,8 +6,8 @@ A from-scratch wardriving mesh built to learn how all the pieces fit together.
 
 **W.A.S.P.** uses a **Nest / Worker** architecture:
 
-- **Nest** (Cheap Yellow Display) — the base station. Purely UI, control, and connectivity. No wardriving. Manages worker status, handles file aggregation, and uploads to WiGLE and WDGWars when connected to a home network. Yellow.
-- **Worker** (Seeed XIAO ESP32-C5) — the autonomous scanner. Dual-band 2.4 GHz + 5 GHz WiFi and BLE. Carries its own GPS and SD card so it operates fully independently. Syncs back to the nest when in range. Black.
+- **Nest** (Cheap Yellow Display) — the base station. Purely UI, control, and connectivity. No wardriving. Manages worker status, handles file aggregation, and uploads to WiGLE and WDGWars when connected to a home network. Yellow. **All rich display work lives here.**
+- **Worker** (Seeed XIAO ESP32-C5) — the autonomous scanner. Dual-band 2.4 GHz + 5 GHz WiFi and BLE. Carries its own GPS and SD card so it operates fully independently. Syncs back to the nest when in range. Black. **Status indicated by a single addressable RGB LED** — keeps power draw minimal for extended battery runs.
 
 > Nest = yellow. Workers = black. Casings to follow.
 
@@ -78,7 +78,7 @@ Want more coverage? Add another worker. The nest never changes.
 │ESP32-C5 │ │ESP32-C5 │ │ESP32-C5 │
 │  black  │ │  black  │ │         │
 │         │ │         │ │         │
-│0.96"OLED│ │0.96"OLED│ │0.96"OLED│
+│RGB LED  │ │RGB LED  │ │RGB LED  │
 │GPS(UART)│ │GPS(UART)│ │RAM buf  │
 │SD card  │ │SD card  │ │no SD/GPS│
 │         │ │         │ │         │
@@ -109,11 +109,12 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 | SD SCK | SD header | D8 | GPIO8 |
 | SD MISO | SD header | D9 | GPIO9 |
 | SD MOSI | SD header | D10 | GPIO10 |
-| OLED SDA | I2C header | D4 | GPIO23 |
-| OLED SCL | I2C header | D5 | GPIO24 |
+| RGB LED data | D0 breakout | D0 | GPIO3 |
+
+> **Note on the RGB LED:** Use an SK6812 mini-e or similar 3.3V-tolerant device directly on the D0 data line; WS2812B works too but prefers 5V logic — at short cable runs the C5's 3.3V output usually drives it reliably. Pull the LED's power from the 3V3 pin for battery efficiency.
 
 **Peripherals per worker:**
-- 0.96" SSD1306 OLED (I2C) — local status display (wired, not yet used in code)
+- Single addressable RGB LED (WS2812/SK6812) — status flashes (GPS state, scan active, sync result). Brightness and on/off controlled via `wasp.cfg` (`ledBrightness`, `ledEnabled`). Replaces SSD1306 OLED — the Nest display handles all rich status; an OLED on a field unit nobody can read wastes power.
 - UART GPS module — independent geo-tagging
 - SPI micro-SD module — local log storage when out of nest range
 
@@ -135,7 +136,8 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 | 7 | Nest display — worker list, scan counts, file browser on CYD touch | ✅ Complete |
 | 8 | Unified worker firmware — auto-detects Worker vs Drone mode at boot | ✅ Complete |
 | 9 | Hardened file sync — 8 KB log cap, RAM pre-buffer, path validation, TCP upload | ✅ Complete |
-| 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | Planned |
+| 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | ✅ Complete |
+| 11 | RGB LED status — replace OLED with single addressable LED; brightness + on/off in worker.cfg | Planned |
 
 ---
 
@@ -162,6 +164,34 @@ Install via `Tools > Board > Board Manager`.
 |---|---|
 | NimBLE-Arduino by h2zero | Tools > Manage Libraries |
 | TinyGPS++ by Mikal Hart | Tools > Manage Libraries |
+| Adafruit NeoPixel by Adafruit | Tools > Manage Libraries |
+
+### Config Files
+
+Both devices use a simple `key=value` config file on their own SD card. Lines starting with `#` are comments; no spaces around `=`.
+
+**Nest — `/wasp.cfg`** (see `wasp.cfg.example`)
+
+| Key | Default | Description |
+|---|---|---|
+| `homeSsid` | — | Home Wi-Fi SSID for WiGLE / WDGWars uploads |
+| `homePsk` | — | Home Wi-Fi password |
+| `apSsid` | `WASP-Nest` | Nest AP name that workers connect to for file sync |
+| `apPsk` | `waspswarm` | Nest AP password |
+| `wigleBasicToken` | — | WiGLE 'Encoded for use' API token |
+| `wdgwarsApiKey` | — | WDGWars API key (64 hex chars) |
+
+**Worker — `/worker.cfg`** (see `worker.cfg.example`)
+
+| Key | Default | Description |
+|---|---|---|
+| `ledEnabled` | `true` | `false` or `0` to disable all LED output |
+| `ledBrightness` | `40` | NeoPixel brightness 0–255 (40 ≈ 15%, visible but not blinding) |
+
+Config is read once at boot. If the file is absent, compiled-in defaults apply.
+Each worker can carry its own `worker.cfg` so units can be tuned independently without reflashing.
+
+---
 
 ### Stage 1 — ESP-NOW Ping-Pong
 
@@ -277,11 +307,9 @@ packet — useful for understanding worker range.
 
 ```
 /
-├── stage9_uploads/                ← active firmware (flash this)
-│   ├── nest/
-│   │   ├── nest.ino               ← CYD: display + AP + raw TCP upload server
-│   │   └── nest_types.h
-│   └── worker/worker.ino          ← C5: unified Worker/Drone + hardened file sync
+├── stage11_rgb_led/               ← active firmware (flash this)
+│   ├── nest/nest.ino              ← CYD: display + AP + chunked TCP upload server
+│   └── worker/worker.ino          ← C5: unified Worker/Drone + RGB LED status
 │
 └── learned/                       ← reference copies of all prior stages
     ├── stage1_espnow_pingpong/
