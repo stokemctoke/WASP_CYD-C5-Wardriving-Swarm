@@ -1,0 +1,7 @@
+# W.A.S.P. Worker configuration
+# Place on the worker's own SD card as /worker.cfg
+# Lines starting with # are comments. No spaces around = signs.
+
+# RGB LED — addressable WS2812/SK6812 on LED_PIN (default D0 / GPIO3)
+ledEnabled=true          # true/false or 1/0 — disables all LED output when false
+ledBrightness=40         # 0–255 — 40 is comfortably visible without being blinding

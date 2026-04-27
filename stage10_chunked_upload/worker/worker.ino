@@ -1,5 +1,5 @@
 /*
- * W.A.S.P. — Unified Worker / Drone Firmware — Stage 9
+ * W.A.S.P. — Unified Worker / Drone Firmware — Stage 10
  * Board: Seeed XIAO ESP32-C5 (on Xiao Expansion dev board)
  *
  * One firmware, two modes — auto-detected at boot:
@@ -50,7 +50,7 @@ static const uint8_t NEST_MAC[6] = {0xA4, 0xF0, 0x0F, 0x5D, 0x96, 0xD4};
 
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
-#define WASP_FIRMWARE_VER  8
+#define WASP_FIRMWARE_VER  10
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -125,6 +125,7 @@ typedef struct __attribute__((packed)) {
 // cap are renamed .toobig and skipped; they can be recovered via chunked
 // upload (Stage 10) or by reading the SD card directly on a PC.
 #define MAX_LOG_BYTES 8192
+#define CHUNK_SIZE    MAX_LOG_BYTES  // max bytes per TCP transaction
 
 // ── RAM buffer (drone mode) ───────────────────────────────────────────────────
 #define CYCLE_SLOTS        25
@@ -530,11 +531,116 @@ static void disconnectFromNest() {
   sendHeartbeat();           // announce return immediately after ESP-NOW is back
 }
 
+// Uploads a file in CHUNK_SIZE segments — each chunk is a separate TCP
+// connection so WiFi is fully down while reading the next chunk from SD.
+static bool uploadFileChunked(const String& path, const String& name, int fileSize) {
+  int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  Serial.printf("[SYNC]  chunked: %d chunk(s) × up to %d B\n", totalChunks, CHUNK_SIZE);
+
+  uint8_t* buf = (uint8_t*)malloc(CHUNK_SIZE);
+  if (!buf) {
+    Serial.printf("[OOM for %d B chunk buf]\n", CHUNK_SIZE);
+    return false;
+  }
+
+  bool allOk = true;
+  for (int ci = 0; ci < totalChunks && allOk; ci++) {
+    int offset    = ci * CHUNK_SIZE;
+    int chunkSize = min(fileSize - offset, CHUNK_SIZE);
+
+    // ── Read chunk while WiFi is OFF ──────────────────────────────────────────
+    {
+      File f = SD.open(path);
+      if (!f) {
+        Serial.printf("[SD open failed chunk %d/%d]\n", ci + 1, totalChunks);
+        allOk = false; break;
+      }
+      if (!f.seek(offset)) {
+        Serial.printf("[SD seek failed chunk %d/%d]\n", ci + 1, totalChunks);
+        f.close(); allOk = false; break;
+      }
+      int got = f.read(buf, chunkSize);
+      f.close();
+      if (got != chunkSize) {
+        Serial.printf("[SD short read chunk %d/%d: %d/%d B]\n",
+                      ci + 1, totalChunks, got, chunkSize);
+        allOk = false; break;
+      }
+    }
+
+    // ── Connect, upload chunk, disconnect ─────────────────────────────────────
+    Serial.printf("         chunk %d/%d  %d B  ...", ci + 1, totalChunks, chunkSize);
+    if (!connectToNest()) { Serial.println("[nest unreachable]"); allOk = false; break; }
+
+    String myMac = WiFi.macAddress(); myMac.replace(":", "");
+    Serial.printf("[%s]", WiFi.localIP().toString().c_str());
+
+    WiFiClient tcp;
+    bool chunkOk = false;
+    if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
+      tcp.setNoDelay(true);
+      tcp.setTimeout(5000);
+      tcp.printf("UPLOAD_CHUNK %s %s %d %d %d\n",
+                 myMac.c_str(), name.c_str(), ci, totalChunks, chunkSize);
+      tcp.flush();
+      String ready = tcp.readStringUntil('\n'); ready.trim();
+      if (ready == "READY") {
+        const uint8_t* ptr = buf;
+        int sent = 0, rem = chunkSize;
+        uint32_t deadline = millis() + 15000;
+        while (rem > 0 && tcp.connected() && millis() < deadline) {
+          int w = tcp.write(ptr, min(rem, 1460));
+          if (w > 0) { ptr += w; sent += w; rem -= w; }
+          else if (w < 0) break;
+          else delay(1);
+        }
+        tcp.flush();
+        String resp = tcp.readStringUntil('\n'); resp.trim();
+        Serial.printf("[%s]", resp.c_str());
+        chunkOk = (resp == "OK") && (sent == chunkSize);
+      } else {
+        Serial.printf("[bad READY: %s]", ready.c_str());
+      }
+    } else {
+      Serial.print("[tcp FAIL]");
+    }
+    tcp.stop();
+    disconnectFromNest();
+    Serial.println(chunkOk ? " OK" : " FAILED");
+    if (!chunkOk) allOk = false;
+    if (ci < totalChunks - 1) delay(300);
+  }
+
+  free(buf);
+  return allOk;
+}
+
 static void syncFiles() {
   Serial.println("\n[SYNC] Starting...");
   if (logFile) { logFile.flush(); logFile.close(); }
 
   int uploaded = 0, failed = 0;
+
+  // ── Restore .toobig files — they will be retried via chunked upload ─────────
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String n = String(entry.name());
+        bool   d = entry.isDirectory();
+        entry.close();
+        if (!d && n.endsWith(".csv.toobig")) {
+          String op = "/logs/" + n;
+          String np = op.substring(0, op.length() - 8);
+          SD.rename(op.c_str(), np.c_str());
+          Serial.printf("[SYNC]  Queued for chunked retry: %s\n", np.c_str());
+        }
+      }
+      dir.close();
+    }
+  }
 
   // SD+WiFi DMA coexistence on the ESP32-C5 is unreliable mid-transfer:
   // f.read() hangs after the first chunk once the WiFi stack is active.
@@ -564,15 +670,18 @@ static void syncFiles() {
       path = name.startsWith("/") ? name : "/logs/" + name;
     }
 
-    // ── Set aside files that exceed the C5's reliable upload size ───────────
-    // These would either OOM on the malloc below or stall partway through TCP
-    // send (the 4380-byte symptom). Renaming to .toobig stops the sync loop
-    // from tripping over them every cycle; data is preserved on the SD card
-    // for offline recovery.
-    if (sz > MAX_LOG_BYTES) {
-      Serial.printf("[SYNC]  %-32s  %5d B  exceeds cap (%d B) — set aside as .toobig\n",
-                    name.c_str(), sz, MAX_LOG_BYTES);
-      SD.rename(path.c_str(), (path + ".toobig").c_str());
+    // ── Route by size: small → single-shot, large → chunked ─────────────────
+    if (sz > CHUNK_SIZE) {
+      Serial.printf("[SYNC]  %-32s  %5d B\n", name.c_str(), sz);
+      bool ok = uploadFileChunked(path, name, sz);
+      if (ok) {
+        SD.rename(path.c_str(), (path + ".done").c_str());
+        Serial.printf("[SYNC]  %s → .done\n", name.c_str()); uploaded++;
+      } else {
+        SD.rename(path.c_str(), (path + ".defer").c_str());
+        Serial.printf("[SYNC]  %s → .defer\n", name.c_str()); failed++;
+      }
+      delay(500);
       continue;
     }
 
@@ -877,7 +986,7 @@ void setup() {
   delay(1000);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. — Stage 9  Unified Firmware");
+  Serial.println(" W.A.S.P. — Stage 10  Chunked Upload");
   Serial.println("========================================");
 
   gpsSerial.setRxBufferSize(512);

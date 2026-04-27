@@ -1,5 +1,5 @@
 /*
- * W.A.S.P. — Unified Worker / Drone Firmware — Stage 9
+ * W.A.S.P. — Unified Worker / Drone Firmware — Stage 11
  * Board: Seeed XIAO ESP32-C5 (on Xiao Expansion dev board)
  *
  * One firmware, two modes — auto-detected at boot:
@@ -12,8 +12,6 @@
  * (oldest slot overwritten first when full). Worker renames uploaded
  * files to .done as before.
  *
- * Compatible nest: stage8_unified/nest  (stage7_nest_display also works)
- *
  * ── Wiring (XIAO Expansion Board) ─────────────────────────────────────────────────
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
@@ -21,6 +19,7 @@
  *   SD SCK  →  D8 (GPIO8)    SPI SCK
  *   SD MISO →  D9 (GPIO9)    SPI MISO
  *   SD MOSI →  D10 (GPIO10)  SPI MOSI
+ *   RGB LED →  D0 (GPIO3)    RMT — change LED_PIN for perfboard layouts
  *
  * ── Arduino IDE settings ──────────────────────────────────────────────────────
  *   Tools > Board              > XIAO_ESP32C5
@@ -29,8 +28,24 @@
  *   Tools > PSRAM              > Disabled
  *
  * ── Libraries ────────────────────────────────────────────────────────────────
- *   NimBLE-Arduino by h2zero   (Tools > Manage Libraries)
- *   TinyGPS++ by Mikal Hart     (Tools > Manage Libraries)
+ *   NimBLE-Arduino by h2zero    (Tools > Manage Libraries)
+ *   TinyGPS++ by Mikal Hart      (Tools > Manage Libraries)
+ *   Adafruit NeoPixel by Adafruit (Tools > Manage Libraries)
+ *
+ * ── LED flash vocabulary ──────────────────────────────────────────────────────
+ *   White  3×  fast    Boot / power-on confirm
+ *   Amber  slow pulse  GPS acquiring (setup)
+ *   Cyan   2×          GPS fix acquired
+ *   Yellow 1×          Scan cycle start
+ *   Blue   fast blink  Connecting to Nest AP
+ *   Green  2×          Sync success
+ *   Red    3×  fast    Sync fail (nest unreachable)
+ *   Orange 4×  fast    Chunked upload failed (file → .defer)
+ *   Red    1×  slow    Low heap warning
+ *
+ * ── Worker config (worker.cfg on worker SD) ───────────────────────────────────
+ *   ledEnabled=true      (true/false or 1/0)
+ *   ledBrightness=40     (0–255)
  */
 
 #include <WiFi.h>
@@ -41,6 +56,7 @@
 #include <TinyGPS++.h>
 #include <SD.h>
 #include <SPI.h>
+#include <Adafruit_NeoPixel.h>
 #include <vector>
 #include <sys/time.h>
 
@@ -50,7 +66,7 @@ static const uint8_t NEST_MAC[6] = {0xA4, 0xF0, 0x0F, 0x5D, 0x96, 0xD4};
 
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
-#define WASP_FIRMWARE_VER  8
+#define WASP_FIRMWARE_VER  11
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -108,6 +124,13 @@ typedef struct __attribute__((packed)) {
 #define SD_MISO   9
 #define SD_MOSI  10
 
+// ── RGB LED ───────────────────────────────────────────────────────────────────
+// Change LED_PIN here when moving to a perfboard layout — this is the only
+// place that needs updating. D0 = GPIO3 on the XIAO Expansion Board.
+#define LED_PIN            3
+#define LED_COUNT          1
+#define LOW_HEAP_THRESHOLD 30000
+
 // ── Scan timing ───────────────────────────────────────────────────────────────
 #define GPS_FEED_MS      500
 #define WIFI_MS_PER_CHAN  80
@@ -125,6 +148,7 @@ typedef struct __attribute__((packed)) {
 // cap are renamed .toobig and skipped; they can be recovered via chunked
 // upload (Stage 10) or by reading the SD card directly on a PC.
 #define MAX_LOG_BYTES 8192
+#define CHUNK_SIZE    MAX_LOG_BYTES  // max bytes per TCP transaction
 
 // ── RAM buffer (drone mode) ───────────────────────────────────────────────────
 #define CYCLE_SLOTS        25
@@ -181,8 +205,53 @@ static uint32_t lastFlushMs     = 0;
 static uint32_t cycleCount      = 0;
 static uint32_t lastHeartbeatMs = 0;
 
+// ── LED state ─────────────────────────────────────────────────────────────────
+static uint8_t ledBrightness = 40;   // overridden by worker.cfg
+static bool    ledEnabled    = true; // overridden by worker.cfg
+static bool    gpsFired      = false; // fire GPS-fix flash only once
+
+Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
 HardwareSerial gpsSerial(1);
 TinyGPSPlus    gps;
+
+// ── RGB LED helpers ───────────────────────────────────────────────────────────
+
+static void ledOff() { led.clear(); led.show(); }
+
+static void ledSet(uint32_t colour) {
+  if (!ledEnabled) { ledOff(); return; }
+  led.setBrightness(ledBrightness);
+  led.setPixelColor(0, colour);
+  led.show();
+}
+
+static void ledFlash(uint32_t colour, int times, int onMs, int offMs) {
+  if (!ledEnabled) return;
+  led.setBrightness(ledBrightness);
+  for (int i = 0; i < times; i++) {
+    led.setPixelColor(0, colour);
+    led.show();
+    delay(onMs);
+    led.clear();
+    led.show();
+    if (i < times - 1) delay(offMs);
+  }
+}
+
+// Named wrappers — see flash vocabulary in file header
+static void ledBoot()       { ledFlash(0xFFFFFF, 3,  50,  50); }  // white 3×
+static void ledGPSFix()     { ledFlash(0x00FFFF, 2, 150, 100); }  // cyan 2×
+static void ledScanCycle()  { ledFlash(0xFFFF00, 1, 100,   0); }  // yellow 1×
+static void ledSyncOK()     { ledFlash(0x00FF00, 2, 150, 100); }  // green 2×
+static void ledSyncFail()   { ledFlash(0xFF0000, 3,  80,  80); }  // red 3×
+static void ledTooBig()     { ledFlash(0xFF6600, 4,  80,  80); }  // orange 4×
+static void ledLowHeap()    { ledFlash(0xFF0000, 1, 400,   0); }  // red 1× slow
+static void ledDronePulse() {                                       // cyan double-pulse
+  ledFlash(0x00FFFF, 2, 200, 100);
+  delay(300);
+  ledFlash(0x00FFFF, 2, 200, 100);
+}
 
 // ── GPS helpers ───────────────────────────────────────────────────────────────
 
@@ -196,12 +265,21 @@ static void feedGPS(unsigned long ms) {
 
 static bool detectGPS() {
   Serial.print(" Detecting GPS ");
-  unsigned long start = millis();
+  unsigned long start      = millis();
+  unsigned long lastToggle = 0;
+  bool          ledOn      = false;
   while (millis() - start < GPS_DETECT_MS) {
     while (gpsSerial.available()) gps.encode(gpsSerial.read());
+    // Slow amber pulse (400ms half-period = 800ms cycle) while waiting for GPS
+    if (millis() - lastToggle >= 400) {
+      lastToggle = millis();
+      ledOn = !ledOn;
+      ledOn ? ledSet(0xFAA307) : ledOff();
+    }
     Serial.print(".");
     delay(100);
   }
+  ledOff();
   Serial.println();
   return gps.charsProcessed() > 0;
 }
@@ -240,7 +318,7 @@ static String nowTimestamp() {
 
 static void setClockFromGPS() {
   if (clockSet || !gps.date.isValid() || !gps.time.isValid()) return;
-  if (gps.date.year() < 2020) return;  // sanity check
+  if (gps.date.year() < 2020) return;
   struct tm t = {};
   t.tm_year = gps.date.year() - 1900;
   t.tm_mon  = gps.date.month() - 1;
@@ -267,10 +345,6 @@ static void flushLog() {
 
 static void maybeFlush() {
   if (++linesSinceFlush >= 25 || (millis() - lastFlushMs) >= 2000) flushLog();
-  // Rotate to a new log file once we cross the size cap. The current row has
-  // already been written to the open file; the next row will land in the new
-  // one. Files stay self-contained CSVs because openLogFile() rewrites the
-  // WigleWifi-1.6 header for each new file.
   if (logFile && (int)logFile.size() >= MAX_LOG_BYTES) {
     Serial.printf("[SD] Rotating log: %s reached %u B (cap %d)\n",
                   logPath.c_str(), (unsigned)logFile.size(), MAX_LOG_BYTES);
@@ -355,8 +429,6 @@ static void logBLERow(const String& mac, const String& name, int rssi,
 
 // ── RAM buffer helpers (drone mode) ───────────────────────────────────────────
 
-// Used by commitCycle() before its definition below — explicit forward decl
-// rather than relying on Arduino IDE's implicit top-level prototype generator.
 static int countUnuploaded();
 
 static void clearPending() {
@@ -384,7 +456,7 @@ static void commitCycle() {
 }
 
 static int countUnuploaded() {
-  if (!cycleBuffer) return 0;  // worker mode never allocates this buffer
+  if (!cycleBuffer) return 0;
   int n = 0;
   for (int i = 0; i < CYCLE_SLOTS; i++)
     if (cycleBuffer[i].used && !cycleBuffer[i].uploaded) n++;
@@ -427,6 +499,29 @@ static String buildCSV(int idx) {
     csv += line; csv += '\n';
   }
   return csv;
+}
+
+// ── Worker config loader ──────────────────────────────────────────────────────
+
+static void loadWorkerConfig() {
+  if (!sdOk) return;
+  File cfg = SD.open("/worker.cfg");
+  if (!cfg) return;
+  while (cfg.available()) {
+    String line = cfg.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("#") || line.isEmpty()) continue;
+    int eq = line.indexOf('=');
+    if (eq < 0) continue;
+    String key = line.substring(0, eq); key.trim();
+    String val = line.substring(eq + 1); val.trim();
+    if      (key == "ledEnabled")    ledEnabled    = (val == "true" || val == "1");
+    else if (key == "ledBrightness") ledBrightness = (uint8_t)constrain(val.toInt(), 0, 255);
+  }
+  cfg.close();
+  Serial.printf("[CFG] ledEnabled=%s  ledBrightness=%d\n",
+                ledEnabled ? "true" : "false", ledBrightness);
+  led.setBrightness(ledBrightness);
 }
 
 // ── ESP-NOW ───────────────────────────────────────────────────────────────────
@@ -510,11 +605,20 @@ static bool connectToNest() {
   esp_now_deinit();
   WiFi.mode(WIFI_STA);
   WiFi.begin(NEST_AP_SSID, NEST_AP_PASS);
-  unsigned long t0 = millis();
+  unsigned long t0       = millis();
+  unsigned long lastLedMs = 0;
+  bool          ledOn    = false;
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 5000) {
     if (gpsOk) while (gpsSerial.available()) gps.encode(gpsSerial.read());
+    // Fast blue blink while connecting
+    if (millis() - lastLedMs >= 200) {
+      lastLedMs = millis();
+      ledOn = !ledOn;
+      ledOn ? ledSet(0x4488FF) : ledOff();
+    }
     delay(200); Serial.print(".");
   }
+  ledOff();
   Serial.println();
   return WiFi.status() == WL_CONNECTED;
 }
@@ -530,11 +634,116 @@ static void disconnectFromNest() {
   sendHeartbeat();           // announce return immediately after ESP-NOW is back
 }
 
+// Uploads a file in CHUNK_SIZE segments — each chunk is a separate TCP
+// connection so WiFi is fully down while reading the next chunk from SD.
+static bool uploadFileChunked(const String& path, const String& name, int fileSize) {
+  int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  Serial.printf("[SYNC]  chunked: %d chunk(s) × up to %d B\n", totalChunks, CHUNK_SIZE);
+
+  uint8_t* buf = (uint8_t*)malloc(CHUNK_SIZE);
+  if (!buf) {
+    Serial.printf("[OOM for %d B chunk buf]\n", CHUNK_SIZE);
+    return false;
+  }
+
+  bool allOk = true;
+  for (int ci = 0; ci < totalChunks && allOk; ci++) {
+    int offset    = ci * CHUNK_SIZE;
+    int chunkSize = min(fileSize - offset, CHUNK_SIZE);
+
+    // ── Read chunk while WiFi is OFF ──────────────────────────────────────────
+    {
+      File f = SD.open(path);
+      if (!f) {
+        Serial.printf("[SD open failed chunk %d/%d]\n", ci + 1, totalChunks);
+        allOk = false; break;
+      }
+      if (!f.seek(offset)) {
+        Serial.printf("[SD seek failed chunk %d/%d]\n", ci + 1, totalChunks);
+        f.close(); allOk = false; break;
+      }
+      int got = f.read(buf, chunkSize);
+      f.close();
+      if (got != chunkSize) {
+        Serial.printf("[SD short read chunk %d/%d: %d/%d B]\n",
+                      ci + 1, totalChunks, got, chunkSize);
+        allOk = false; break;
+      }
+    }
+
+    // ── Connect, upload chunk, disconnect ─────────────────────────────────────
+    Serial.printf("         chunk %d/%d  %d B  ...", ci + 1, totalChunks, chunkSize);
+    if (!connectToNest()) { Serial.println("[nest unreachable]"); allOk = false; break; }
+
+    String myMac = WiFi.macAddress(); myMac.replace(":", "");
+    Serial.printf("[%s]", WiFi.localIP().toString().c_str());
+
+    WiFiClient tcp;
+    bool chunkOk = false;
+    if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
+      tcp.setNoDelay(true);
+      tcp.setTimeout(5000);
+      tcp.printf("UPLOAD_CHUNK %s %s %d %d %d\n",
+                 myMac.c_str(), name.c_str(), ci, totalChunks, chunkSize);
+      tcp.flush();
+      String ready = tcp.readStringUntil('\n'); ready.trim();
+      if (ready == "READY") {
+        const uint8_t* ptr = buf;
+        int sent = 0, rem = chunkSize;
+        uint32_t deadline = millis() + 15000;
+        while (rem > 0 && tcp.connected() && millis() < deadline) {
+          int w = tcp.write(ptr, min(rem, 1460));
+          if (w > 0) { ptr += w; sent += w; rem -= w; }
+          else if (w < 0) break;
+          else delay(1);
+        }
+        tcp.flush();
+        String resp = tcp.readStringUntil('\n'); resp.trim();
+        Serial.printf("[%s]", resp.c_str());
+        chunkOk = (resp == "OK") && (sent == chunkSize);
+      } else {
+        Serial.printf("[bad READY: %s]", ready.c_str());
+      }
+    } else {
+      Serial.print("[tcp FAIL]");
+    }
+    tcp.stop();
+    disconnectFromNest();
+    Serial.println(chunkOk ? " OK" : " FAILED");
+    if (!chunkOk) allOk = false;
+    if (ci < totalChunks - 1) delay(300);
+  }
+
+  free(buf);
+  return allOk;
+}
+
 static void syncFiles() {
   Serial.println("\n[SYNC] Starting...");
   if (logFile) { logFile.flush(); logFile.close(); }
 
   int uploaded = 0, failed = 0;
+
+  // ── Restore .toobig files — they will be retried via chunked upload ─────────
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String n = String(entry.name());
+        bool   d = entry.isDirectory();
+        entry.close();
+        if (!d && n.endsWith(".csv.toobig")) {
+          String op = "/logs/" + n;
+          String np = op.substring(0, op.length() - 8);
+          SD.rename(op.c_str(), np.c_str());
+          Serial.printf("[SYNC]  Queued for chunked retry: %s\n", np.c_str());
+        }
+      }
+      dir.close();
+    }
+  }
 
   // SD+WiFi DMA coexistence on the ESP32-C5 is unreliable mid-transfer:
   // f.read() hangs after the first chunk once the WiFi stack is active.
@@ -564,15 +773,19 @@ static void syncFiles() {
       path = name.startsWith("/") ? name : "/logs/" + name;
     }
 
-    // ── Set aside files that exceed the C5's reliable upload size ───────────
-    // These would either OOM on the malloc below or stall partway through TCP
-    // send (the 4380-byte symptom). Renaming to .toobig stops the sync loop
-    // from tripping over them every cycle; data is preserved on the SD card
-    // for offline recovery.
-    if (sz > MAX_LOG_BYTES) {
-      Serial.printf("[SYNC]  %-32s  %5d B  exceeds cap (%d B) — set aside as .toobig\n",
-                    name.c_str(), sz, MAX_LOG_BYTES);
-      SD.rename(path.c_str(), (path + ".toobig").c_str());
+    // ── Route by size: small → single-shot, large → chunked ─────────────────
+    if (sz > CHUNK_SIZE) {
+      Serial.printf("[SYNC]  %-32s  %5d B\n", name.c_str(), sz);
+      bool ok = uploadFileChunked(path, name, sz);
+      if (ok) {
+        SD.rename(path.c_str(), (path + ".done").c_str());
+        Serial.printf("[SYNC]  %s → .done\n", name.c_str()); uploaded++;
+      } else {
+        ledTooBig();  // orange 4× — large file failed even after chunked attempt
+        SD.rename(path.c_str(), (path + ".defer").c_str());
+        Serial.printf("[SYNC]  %s → .defer\n", name.c_str()); failed++;
+      }
+      delay(500);
       continue;
     }
 
@@ -630,7 +843,7 @@ static void syncFiles() {
           int rem = sz;
           uint32_t wDeadline = millis() + 30000;
           while (rem > 0 && tcp.connected() && millis() < wDeadline) {
-            int toSend = min(rem, 1460);  // one TCP segment (MTU) — each write maps to one IP packet
+            int toSend = min(rem, 1460);
             int w = tcp.write(ptr, toSend);
             if (w > 0) { ptr += w; sent += w; rem -= w; }
             else if (w < 0) break;
@@ -690,6 +903,11 @@ static void syncFiles() {
   SD.begin(SD_CS, SPI);
 
   Serial.printf("[SYNC] Done — %d uploaded, %d failed\n", uploaded, failed);
+
+  // LED summary: one flash at end of the whole sync rather than per-file
+  if (uploaded > 0 && failed == 0) ledSyncOK();
+  else if (failed > 0)             ledSyncFail();
+
   if (sdOk) openLogFile();
 }
 
@@ -703,6 +921,7 @@ static void syncBuffer() {
 
   if (!connectToNest()) {
     Serial.println("[SYNC] Nest not reachable — buffer retained");
+    ledSyncFail();
     disconnectFromNest();
     return;
   }
@@ -731,7 +950,11 @@ static void syncBuffer() {
   }
   Serial.printf("[SYNC] Done — %d uploaded, %d failed\n", uploaded, failed);
 
+  if (uploaded > 0 && failed == 0) ledSyncOK();
+  else if (failed > 0)             ledSyncFail();
+
   disconnectFromNest();
+  ledDronePulse();
 }
 
 // ── WiFi scan ─────────────────────────────────────────────────────────────────
@@ -876,8 +1099,13 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // LED up first so boot flash fires as early as possible
+  led.begin();
+  ledOff();
+  ledBoot();
+
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. — Stage 9  Unified Firmware");
+  Serial.println(" W.A.S.P. — Stage 11  RGB LED");
   Serial.println("========================================");
 
   gpsSerial.setRxBufferSize(512);
@@ -903,7 +1131,11 @@ void setup() {
   sdOk = SD.begin(SD_CS, SPI);
   if (sdOk && !SD.exists("/logs")) SD.mkdir("/logs");
 
+  // Load per-worker LED config from SD before detectGPS() uses the LED
+  loadWorkerConfig();
+
   gpsOk = detectGPS();
+  if (gpsOk) ledGPSFix();
 
   droneMode = !sdOk;
 
@@ -912,8 +1144,6 @@ void setup() {
     pendingWifi = (wifi_entry_t*)malloc(MAX_WIFI_PER_SLOT * sizeof(wifi_entry_t));
     pendingBle  = (ble_entry_t*)malloc(MAX_BLE_PER_SLOT  * sizeof(ble_entry_t));
     if (!cycleBuffer || !pendingWifi || !pendingBle) {
-      // Fail loud, fail fast: a silent NULL deref 30 s later inside a scan
-      // would be harder to diagnose than a clean reboot here.
       Serial.printf("\n[FATAL] Drone-mode buffer alloc failed (free heap=%u). Rebooting in 2s...\n",
                     (unsigned)ESP.getFreeHeap());
       delay(2000);
@@ -937,10 +1167,9 @@ void setup() {
     if (sdOk) openLogFile();
   }
   Serial.printf(" │  Sync  :  every %d cycles             │\n", SYNC_EVERY);
+  Serial.printf(" │  LED   :  pin %d  bright %d           │\n", LED_PIN, ledBrightness);
   Serial.println(" └─────────────────────────────────────┘\n");
 
-  // Upload any files left from the previous session before starting scan cycles.
-  // syncFiles() re-opens a fresh log file at the end, so no double-open.
   if (!droneMode && sdOk && hasPendingFiles()) {
     Serial.println(" Pending files found — syncing to Nest before first cycle...");
     syncFiles();
@@ -956,11 +1185,24 @@ void loop() {
   Serial.printf("\n======================================== [cycle %u]\n", cycleCount + 1);
   maybeHeartbeat();
 
+  // Heap warning — fires once per cycle while heap is low
+  if (ESP.getFreeHeap() < LOW_HEAP_THRESHOLD) {
+    Serial.printf("[WARN] Low heap: %u B\n", (unsigned)ESP.getFreeHeap());
+    ledLowHeap();
+  }
+
   if (gpsOk) { feedGPS(GPS_FEED_MS); setClockFromGPS(); }
   printGPSStatus();
 
+  // One-shot cyan flash on first confirmed GPS fix
+  if (gpsOk && gps.location.isValid() && !gpsFired) {
+    gpsFired = true;
+    ledGPSFix();
+  }
+
   if (droneMode) clearPending();
 
+  ledScanCycle();  // yellow flash at the top of every active scan
   WiFiScanResult wifi = runWiFiScan();
   int            ble  = runBLEScan();
 
