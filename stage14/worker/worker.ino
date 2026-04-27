@@ -623,14 +623,14 @@ static void loadWorkerConfig() {
     else if (key == "nestPsk")       val.toCharArray(nestPsk,  sizeof(nestPsk));
     else if (key == "nestIp")        val.toCharArray(nestIp,   sizeof(nestIp));
     // Sync & timing
-    else if (key == "syncEvery")           syncEvery           = max(1, val.toInt());
-    else if (key == "heartbeatIntervalMs") heartbeatIntervalMs = max(1000, val.toInt());
+    else if (key == "syncEvery")           syncEvery           = max(1, (int)val.toInt());
+    else if (key == "heartbeatIntervalMs") heartbeatIntervalMs = max(1000, (int)val.toInt());
     else if (key == "wifiChanMs")          wifiChanMs          = constrain(val.toInt(), 20, 500);
     else if (key == "bleScanMs")           bleScanMs           = constrain(val.toInt(), 500, 10000);
-    else if (key == "cycleDelayMs")        cycleDelayMs        = max(0, val.toInt());
+    else if (key == "cycleDelayMs")        cycleDelayMs        = max(0, (int)val.toInt());
     // Log & memory
     else if (key == "maxLogBytes")      maxLogBytes      = constrain(val.toInt(), 1024, 65536);
-    else if (key == "lowHeapThreshold") lowHeapThreshold = max(8192, val.toInt());
+    else if (key == "lowHeapThreshold") lowHeapThreshold = max(8192, (int)val.toInt());
   }
   cfg.close();
   Serial.printf("[CFG] led=%s/%d/%s  nest=%s  sync=%d  wifiChan=%dms  ble=%dms  cycle=%dms\n",
@@ -790,12 +790,11 @@ static bool uploadFileChunked(const String& path, const String& name, int fileSi
       }
     }
 
-    // ── Connect, upload chunk, disconnect ─────────────────────────────────────
+    // ── Upload chunk over the already-open nest WiFi association ─────────────
+    // Caller is responsible for connectToNest() before / disconnectFromNest() after.
     Serial.printf("         chunk %d/%d  %d B  ...", ci + 1, totalChunks, chunkSize);
-    if (!connectToNest()) { Serial.println("[nest unreachable]"); allOk = false; break; }
 
     String myMac = WiFi.macAddress(); myMac.replace(":", "");
-    Serial.printf("[%s]", WiFi.localIP().toString().c_str());
 
     WiFiClient tcp;
     bool chunkOk = false;
@@ -827,10 +826,9 @@ static bool uploadFileChunked(const String& path, const String& name, int fileSi
       Serial.print("[tcp FAIL]");
     }
     tcp.stop();
-    disconnectFromNest();
     Serial.println(chunkOk ? " OK" : " FAILED");
     if (!chunkOk) allOk = false;
-    if (ci < totalChunks - 1) delay(300);
+    if (ci < totalChunks - 1) delay(50);
   }
 
   free(buf);
@@ -896,6 +894,20 @@ static void syncFiles() {
   }
   Serial.printf("[SYNC] %d file(s) queued\n", queueLen);
 
+  // ── Connect to nest ONCE, hold the association across all files ────────────
+  // Previously we connected/disconnected per file (and per chunk!), burning
+  // ~5 s of WiFi handshake overhead on every transfer. One association is
+  // enough — TCP sockets are cheap to open over an existing WiFi link.
+  if (queueLen > 0) {
+    if (!connectToNest()) {
+      Serial.println("[SYNC] Nest WiFi unreachable — aborting sync");
+      // Fall through to deferred-restore + log-reopen at the end of syncFiles().
+      queueLen = 0;
+    } else {
+      Serial.printf("[SYNC] Connected  IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+  }
+
   for (int qi = 0; qi < queueLen; qi++) {
     String name = queueName[qi];
     int    sz   = queueSize[qi];
@@ -913,13 +925,15 @@ static void syncFiles() {
         SD.rename(path.c_str(), (path + ".defer").c_str());
         Serial.printf("[SYNC]  %s → .defer\n", name.c_str()); failed++;
       }
-      delay(500);
+      delay(50);
       continue;
     }
 
     Serial.printf("[SYNC]  %-32s  %5d B  ...", name.c_str(), sz);
 
-    // ── Pre-buffer entire file from SD while WiFi is off ─────────────────────
+    // ── Pre-buffer entire file from SD ─────────────────────────────────────
+    // SD/WiFi DMA coexistence on ESP32-C5: f.read() can hang once WiFi is
+    // active. Reading the whole file into RAM up front side-steps that.
     uint8_t* fileBuf = (uint8_t*)malloc(sz);
     if (!fileBuf) {
       Serial.printf("[OOM %dB] — deferred\n", sz);
@@ -947,14 +961,12 @@ static void syncFiles() {
       }
     }
 
-    // ── Connect and stream from RAM — no SD access during WiFi ───────────────
-    bool nestOk  = connectToNest();
+    // ── Stream over the existing nest WiFi association ───────────────────────
     bool ok      = false;
     int  sent    = 0;
     bool tcpFail = false;
-    if (nestOk) {
+    {
       String myMac = WiFi.macAddress(); myMac.replace(":", "");
-      Serial.printf(" [%s]", WiFi.localIP().toString().c_str());
       WiFiClient tcp;
       Serial.print(" tcp..");
       if (tcp.connect(nestIp, NEST_UPLOAD_PORT)) {
@@ -992,12 +1004,14 @@ static void syncFiles() {
       tcp.stop();
     }
     free(fileBuf);
-    disconnectFromNest();
 
     if (ok) {
       SD.rename(path.c_str(), (path + ".done").c_str());
       Serial.printf(" OK\n"); uploaded++;
-    } else if (!nestOk || tcpFail) {
+    } else if (tcpFail) {
+      // Nest AP still associated but its TCP server isn't responding — likely
+      // restarting, busy with home upload, or moved out of range. Stop now,
+      // restore deferred files at the end of syncFiles, retry next cycle.
       Serial.println("\n[SYNC] Nest TCP not reachable — stopping");
       break;
     } else {
@@ -1005,8 +1019,11 @@ static void syncFiles() {
       SD.rename(path.c_str(), (path + ".defer").c_str());
       failed++;
     }
-    delay(500);
+    delay(50);
   }
+
+  // ── Disconnect from nest ONCE after all files attempted ────────────────────
+  if (WiFi.status() == WL_CONNECTED) disconnectFromNest();
 
   // ── Restore deferred files for retry next sync ───────────────────────────
   {
