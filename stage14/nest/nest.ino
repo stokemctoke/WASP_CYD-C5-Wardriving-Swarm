@@ -416,8 +416,8 @@ static bool uploadFileToWigle(const String& path, const String& fileName) {
   return (code == 200);
 }
 
-// WDGWars upload — verify the endpoint and header name from your wdgwars.pl profile
-// before your first real wardrive. Stubbed here with best-guess values.
+// WDGWars upload — POST multipart/form-data to /api/upload-csv, WigleWifi-1.6 CSV format.
+// Header: X-API-Key (64-char hex). Field: "file". Confirmed from wdgwars.pl/help/#api-docs.
 static bool uploadFileToWdgwars(const String& path, const String& fileName) {
   if (!cfg.wdgwarsApiKey[0]) return false;
   File f = SD.open(path.c_str());
@@ -445,19 +445,99 @@ static bool uploadFileToWdgwars(const String& path, const String& fileName) {
 
   WiFiClientSecure wc; wc.setInsecure();
   HTTPClient http;
-  http.begin(wc, "https://wdgwars.pl/api/v1/upload");  // TODO: confirm from wdgwars.pl profile
-  http.addHeader("X-Api-Key",    cfg.wdgwarsApiKey);   // TODO: confirm header name
+  http.begin(wc, "https://wdgwars.pl/api/upload-csv");
+  http.addHeader("X-API-Key",    cfg.wdgwarsApiKey);
   http.addHeader("Content-Type", String("multipart/form-data; boundary=") + boundary);
   http.addHeader("Accept",       "application/json");
   http.setTimeout(20000);
   int code = http.POST(body, total);
+  if (code != 200) Serial.printf("[WDG] resp: %s\n", http.getString().c_str());
   http.end(); free(body);
   Serial.printf("[WDG] %s  HTTP %d\n", fileName.c_str(), code);
   return (code == 200);
 }
 
-// Connects to home WiFi, walks /logs/MACADDR/*.csv, uploads to WiGLE + WDGWars,
-// renames each file to .done on success, then restores AP + ESP-NOW.
+// Merges all pending /logs/MACADDR/*.csv into a single WigleWifi-1.6 file at outPath.
+// First file's two header lines are written once; subsequent files skip them.
+// Built on SD before WiFi starts to avoid SD/WiFi DMA coexistence issues.
+// Returns the number of source files merged (0 = nothing to do or SD error).
+static int buildMergedCsv(const String& outPath) {
+  if (SD.exists(outPath.c_str())) SD.remove(outPath.c_str());
+  File out = SD.open(outPath.c_str(), FILE_WRITE);
+  if (!out) return 0;
+
+  bool headerWritten = false;
+  int  count = 0;
+  uint8_t buf[512];
+
+  File root = SD.open("/logs");
+  if (!root) { out.close(); return 0; }
+  while (true) {
+    File macDir = root.openNextFile();
+    if (!macDir) break;
+    if (!macDir.isDirectory()) { macDir.close(); continue; }
+    String macName = "/logs/" + String(macDir.name());
+    macDir.close();
+    File sub = SD.open(macName.c_str());
+    if (!sub) continue;
+    while (true) {
+      File cf = sub.openNextFile();
+      if (!cf) break;
+      String name = String(cf.name());
+      bool isCsv = name.endsWith(".csv") && !cf.isDirectory() && cf.size() > 0;
+      cf.close();
+      if (!isCsv) continue;
+      File src = SD.open((macName + "/" + name).c_str());
+      if (!src) continue;
+      if (!headerWritten) {
+        size_t n;
+        while ((n = src.read(buf, sizeof(buf))) > 0) out.write(buf, n);
+        headerWritten = true;
+      } else {
+        src.readStringUntil('\n');  // skip WigleWifi-1.6 app line
+        src.readStringUntil('\n');  // skip MAC,SSID,... column header
+        size_t n;
+        while ((n = src.read(buf, sizeof(buf))) > 0) out.write(buf, n);
+      }
+      src.close();
+      count++;
+    }
+    sub.close();
+  }
+  root.close();
+  out.close();
+  return count;
+}
+
+// Renames every /logs/MACADDR/*.csv to .done after a successful upload batch.
+static void markAllCsvsDone() {
+  File root = SD.open("/logs");
+  if (!root) return;
+  while (true) {
+    File macDir = root.openNextFile();
+    if (!macDir) break;
+    if (!macDir.isDirectory()) { macDir.close(); continue; }
+    String macName = "/logs/" + String(macDir.name());
+    macDir.close();
+    File sub = SD.open(macName.c_str());
+    if (!sub) continue;
+    while (true) {
+      File cf = sub.openNextFile();
+      if (!cf) break;
+      String name = String(cf.name());
+      bool isCsv = name.endsWith(".csv") && !cf.isDirectory();
+      cf.close();
+      if (!isCsv) continue;
+      String fp = macName + "/" + name;
+      SD.rename(fp.c_str(), (fp + ".done").c_str());
+    }
+    sub.close();
+  }
+  root.close();
+}
+
+// Connects to home WiFi, merges all pending CSVs into one WigleWifi-1.6 file,
+// uploads it once to WiGLE and WDGWars, marks sources done, restores AP + ESP-NOW.
 static void runHomeUploads() {
   if (uploadRunning || !sdOk) return;
   if (!cfg.homeSsid[0]) return;
@@ -465,9 +545,23 @@ static void runHomeUploads() {
   if (!hasFilesToUpload()) { Serial.println("[HOME] No files to upload"); return; }
 
   uploadRunning = true;
-  Serial.printf("\n[HOME] Connecting to %s ...", cfg.homeSsid);
-  nestLedFlashEvent(evNestUploadAct);  // solid cyan — uploading
+  nestLedFlashEvent(evNestUploadAct);
 
+  // Build merged CSV on SD before bringing up WiFi (avoids SD/WiFi DMA conflict)
+  const String mergePath = "/merge_tmp.csv";
+  int mergedCount = buildMergedCsv(mergePath);
+  if (mergedCount == 0) {
+    Serial.println("[HOME] Merge produced no files — aborting");
+    nestLedOff(); nestLedFlashEvent(evNestUploadFail);
+    uploadRunning = false;
+    return;
+  }
+  { File mf = SD.open(mergePath.c_str());
+    Serial.printf("[HOME] Merged %d file(s) → %s (%d B)\n",
+                  mergedCount, mergePath.c_str(), mf ? (int)mf.size() : 0);
+    if (mf) mf.close(); }
+
+  Serial.printf("[HOME] Connecting to %s ...", cfg.homeSsid);
   esp_now_deinit();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
@@ -482,6 +576,7 @@ static void runHomeUploads() {
     Serial.println("[HOME] Connect failed — restoring AP");
     nestLedOff(); nestLedFlashEvent(evNestUploadFail);
     homeStatus = 2;
+    SD.remove(mergePath.c_str());
     WiFi.disconnect(true); delay(200);
     restoreNestAP();
     uploadRunning = false;
@@ -489,58 +584,30 @@ static void runHomeUploads() {
   }
   Serial.printf("[HOME] Connected  IP: %s\n", WiFi.localIP().toString().c_str());
 
-  int wigleOk = 0, wigleFail = 0, wdgOk = 0, wdgFail = 0;
+  bool wOk = cfg.wigleBasicToken[0] ? uploadFileToWigle(mergePath,   "WASP_merged.csv") : true;
+  bool dOk = cfg.wdgwarsApiKey[0]   ? uploadFileToWdgwars(mergePath, "WASP_merged.csv") : true;
 
-  // Walk /logs/MACADDR/*.csv
-  File root = SD.open("/logs");
-  if (root) {
-    while (true) {
-      File macDir = root.openNextFile();
-      if (!macDir) break;
-      if (!macDir.isDirectory()) { macDir.close(); continue; }
-      String macName = "/logs/" + String(macDir.name());
-      macDir.close();
-
-      File sub = SD.open(macName.c_str());
-      if (!sub) continue;
-      while (true) {
-        File cf = sub.openNextFile();
-        if (!cf) break;
-        String name = String(cf.name());
-        int    csz  = (int)cf.size();
-        bool   isCsv = name.endsWith(".csv") && !cf.isDirectory() && csz > 0;
-        cf.close();
-        if (!isCsv) continue;
-
-        String fullPath = macName + "/" + name;
-        bool wOk = cfg.wigleBasicToken[0]  ? uploadFileToWigle(fullPath, name)   : true;
-        bool dOk = cfg.wdgwarsApiKey[0]    ? uploadFileToWdgwars(fullPath, name) : true;
-
-        if (cfg.wigleBasicToken[0])  wOk ? wigleOk++ : wigleFail++;
-        if (cfg.wdgwarsApiKey[0])    dOk ? wdgOk++   : wdgFail++;
-
-        if (wOk && dOk) SD.rename(fullPath.c_str(), (fullPath + ".done").c_str());
-      }
-      sub.close();
-    }
-    root.close();
-  }
+  SD.remove(mergePath.c_str());
 
   taskENTER_CRITICAL(&gLock);
   if (cfg.wigleBasicToken[0])
-    snprintf(lastWigleStr, sizeof(lastWigleStr), "%d OK %d fail", wigleOk, wigleFail);
+    snprintf(lastWigleStr, sizeof(lastWigleStr), wOk ? "%d files OK" : "FAIL", mergedCount);
   if (cfg.wdgwarsApiKey[0])
-    snprintf(lastWdgStr,   sizeof(lastWdgStr),   "%d OK %d fail", wdgOk,   wdgFail);
+    snprintf(lastWdgStr,   sizeof(lastWdgStr),   dOk ? "%d files OK" : "FAIL", mergedCount);
   taskEXIT_CRITICAL(&gLock);
 
-  Serial.printf("[HOME] Done — WiGLE %d/%d  WDGWars %d/%d\n",
-                wigleOk, wigleOk + wigleFail, wdgOk, wdgOk + wdgFail);
+  Serial.printf("[HOME] Done — WiGLE %s  WDGWars %s\n",
+                wOk ? "OK" : "FAIL", dOk ? "OK" : "FAIL");
 
-  bool anyFail = (wigleFail + wdgFail) > 0;
-  bool anyOk   = (wigleOk   + wdgOk)   > 0;
   nestLedOff();
-  if  (anyOk && !anyFail) { nestLedFlashEvent(evNestUploadOK);   homeStatus = 1; }
-  else                    { nestLedFlashEvent(evNestUploadFail);  homeStatus = 2; }
+  if (wOk && dOk) {
+    markAllCsvsDone();
+    nestLedFlashEvent(evNestUploadOK);
+    homeStatus = 1;
+  } else {
+    nestLedFlashEvent(evNestUploadFail);
+    homeStatus = 2;
+  }
 
   WiFi.disconnect(true); delay(200);
   restoreNestAP();
@@ -1033,7 +1100,7 @@ void setup() {
   delay(500);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. Nest — Stage 12");
+  Serial.println(" W.A.S.P. Nest — Stage 13");
   Serial.println(" ESP-NOW + WiFi AP + Chunked Upload + Home Upload");
   Serial.println("========================================");
 
