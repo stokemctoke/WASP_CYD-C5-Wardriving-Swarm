@@ -1,12 +1,12 @@
 /*
  * WORKER - Stage 4: GPS-Tagged WiFi + BLE Scan + SD Logging (WiGLE CSV)
- * Board: Seeed XIAO ESP32-C5 (on Piglet dev board)
+ * Board: Seeed XIAO ESP32-C5 (on XIAO Expansion Board)
  *
  * Adds SD card logging to Stage 3. Each boot creates a new WiGLE-format
  * CSV in /logs/ on the SD card. Rows are only written when a GPS fix is
  * valid so every entry carries real coordinates.
  *
- * Wiring (Piglet dev board, confirmed working):
+ * Wiring (XIAO Expansion Board, confirmed working):
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
  *   SD CS   →  D2 (GPIO25)   SPI CS
@@ -37,7 +37,7 @@
 #define GPS_RX_PIN  12    // GPIO12 = D7
 #define GPS_TX_PIN  11    // GPIO11 = D6
 
-// ── SD (Piglet dev board C5 pin map, confirmed working) ──────────────────────
+// ── SD (XIAO Expansion Board C5 pin map, confirmed working) ──────────────────────
 #define SD_CS    25   // GPIO25 = D2
 #define SD_SCK    8   // GPIO8  = D8
 #define SD_MISO   9   // GPIO9  = D9

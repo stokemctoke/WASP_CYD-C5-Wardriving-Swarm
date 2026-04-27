@@ -1,6 +1,6 @@
 /*
  * WORKER - Stage 5: GPS + SD Logging + ESP-NOW Summary Streaming
- * Board: Seeed XIAO ESP32-C5 (on Piglet dev board)
+ * Board: Seeed XIAO ESP32-C5 (on XIAO Expansion Board)
  *
  * Builds on Stage 4. After each scan cycle the Worker packs a summary
  * struct and sends it to the Nest via ESP-NOW. SD logging continues
@@ -9,7 +9,7 @@
  * The WiFi scan hops channels; the radio is reset to ESPNOW_CHANNEL
  * before each send so the Nest can always receive.
  *
- * Wiring (Piglet dev board, confirmed working):
+ * Wiring (XIAO Expansion Board, confirmed working):
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
  *   SD CS   →  D2 (GPIO25)   SPI CS

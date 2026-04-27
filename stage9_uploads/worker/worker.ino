@@ -14,7 +14,7 @@
  *
  * Compatible nest: stage8_unified/nest  (stage7_nest_display also works)
  *
- * ── Wiring (Piglet dev board) ─────────────────────────────────────────────────
+ * ── Wiring (XIAO Expansion Board) ─────────────────────────────────────────────────
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
  *   SD CS   →  D2 (GPIO25)   SPI CS

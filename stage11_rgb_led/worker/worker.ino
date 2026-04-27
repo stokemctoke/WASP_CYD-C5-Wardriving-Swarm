@@ -12,7 +12,7 @@
  * (oldest slot overwritten first when full). Worker renames uploaded
  * files to .done as before.
  *
- * ── Wiring (Piglet dev board) ─────────────────────────────────────────────────
+ * ── Wiring (XIAO Expansion Board) ─────────────────────────────────────────────────
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
  *   SD CS   →  D2 (GPIO25)   SPI CS

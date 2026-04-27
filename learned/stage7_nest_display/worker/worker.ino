@@ -1,13 +1,13 @@
 /*
  * WORKER - Stage 6: GPS + SD Logging + ESP-NOW Streaming + File Sync
- * Board: Seeed XIAO ESP32-C5 (on Piglet dev board)
+ * Board: Seeed XIAO ESP32-C5 (on XIAO Expansion Board)
  *
  * Builds on Stage 5. Every SYNC_EVERY scan cycles the Worker pauses,
  * connects to the Nest AP ("WASP-Nest"), uploads all unsynced CSV logs
  * via HTTP POST, then returns to scanning. Uploaded files are renamed
  * to .csv.done so they are not re-sent next cycle.
  *
- * Wiring (Piglet dev board, confirmed working):
+ * Wiring (XIAO Expansion Board, confirmed working):
  *   GPS TX  →  D7 (GPIO12)   UART1 RX
  *   GPS RX  →  D6 (GPIO11)   UART1 TX  (optional)
  *   SD CS   →  D2 (GPIO25)   SPI CS
