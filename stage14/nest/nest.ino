@@ -50,6 +50,17 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+
+// ── Nest LED event descriptor ─────────────────────────────────────────────────
+// Colour is 24-bit hex; R/G/B channels are binary (non-zero = on) since the
+// CYD onboard LED has no PWM. flashes=0 = solid on (for upload-in-progress).
+struct LedEvent {
+  uint32_t colour;
+  int      flashes;
+  int      onMs;
+  int      offMs;
+};
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 #define TFT_BACKLIGHT  21
@@ -265,16 +276,6 @@ static void nestLedFlash(bool r, bool g, bool b, int times, int onMs, int offMs)
     if (i < times - 1) delay(offMs);
   }
 }
-
-// ── Nest LED event descriptor ─────────────────────────────────────────────────
-// Colour is 24-bit hex; R/G/B channels are binary (non-zero = on) since the
-// CYD onboard LED has no PWM. flashes=0 = solid on (for upload-in-progress).
-struct LedEvent {
-  uint32_t colour;
-  int      flashes;
-  int      onMs;
-  int      offMs;
-};
 
 static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 }; // white   — startup / config loaded
 static LedEvent evNestHeartbeat  = { 0xFF69B4, 2,  80,  80 }; // pink    — heartbeat / idle
