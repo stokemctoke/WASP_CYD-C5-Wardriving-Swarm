@@ -120,6 +120,9 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 
 **Nest peripherals:**
 - SD card (built-in CYD slot) — aggregated log storage
+- Onboard RGB LED (active LOW) — status flashes. Red: GPIO 4, Green: GPIO 16, Blue: GPIO 17. GPIO 4 is shared with `TFT_RST` in `User_Setup.h`; safe to use as an output after `tft.init()` completes.
+
+> **Display driver:** The JC2432W328C runs an **ILI9341** panel — confirmed by working firmware. Some sources list ST7789; that applies to a different CYD variant. Configure `TFT_eSPI`'s `User_Setup.h` with `#define ILI9341_DRIVER`.
 
 ---
 

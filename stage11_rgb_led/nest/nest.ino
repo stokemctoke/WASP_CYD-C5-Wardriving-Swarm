@@ -1,5 +1,5 @@
 /*
- * NEST - Stage 10: Chunked Upload + Website Colour Scheme
+ * NEST - Stage 11: RGB LED status indicator
  * Board: CYD (JC2432W328C) — standard ESP32
  *
  * Extends Stage 7 with:
@@ -48,6 +48,13 @@
 #define SD_SCK         18
 #define SD_MISO        19
 #define SD_MOSI        23
+
+// ── CYD onboard RGB LED (active LOW) ─────────────────────────────────────────
+// GPIO 4 is shared with TFT_RST in User_Setup.h. The reset pulse fires once
+// inside tft.init(); after that GPIO 4 is safe to drive as a plain output.
+#define NEST_LED_R  4
+#define NEST_LED_G  16
+#define NEST_LED_B  17
 
 // ── Network ───────────────────────────────────────────────────────────────────
 #define ESPNOW_CHANNEL  1
@@ -201,6 +208,34 @@ static char lastSyncStr[48] = "none";
 
 static portMUX_TYPE gLock = portMUX_INITIALIZER_UNLOCKED;
 
+// Flags set by callbacks (WiFi task / upload task) and consumed by loop()
+// to avoid delay() inside callback context.
+static volatile bool ledHeartbeatFlag = false;
+static volatile bool ledSyncFlag      = false;
+
+// ── CYD RGB LED helpers ───────────────────────────────────────────────────────
+
+static void nestLedOff() {
+  digitalWrite(NEST_LED_R, HIGH);
+  digitalWrite(NEST_LED_G, HIGH);
+  digitalWrite(NEST_LED_B, HIGH);
+}
+
+static void nestLedSet(bool r, bool g, bool b) {
+  digitalWrite(NEST_LED_R, r ? LOW : HIGH);
+  digitalWrite(NEST_LED_G, g ? LOW : HIGH);
+  digitalWrite(NEST_LED_B, b ? LOW : HIGH);
+}
+
+static void nestLedFlash(bool r, bool g, bool b, int times, int onMs, int offMs) {
+  for (int i = 0; i < times; i++) {
+    nestLedSet(r, g, b);
+    delay(onMs);
+    nestLedOff();
+    if (i < times - 1) delay(offMs);
+  }
+}
+
 TFT_eSPI  tft = TFT_eSPI();
 SPIClass  sdSpi(VSPI);
 WebServer   server(80);
@@ -258,6 +293,7 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   char mac[18];
 
   if (data[0] == WASP_PKT_HEARTBEAT && len >= 7) {
+    ledHeartbeatFlag = true;  // loop() will flash green — safe from callback context
     const heartbeat_t* pkt = (const heartbeat_t*)data;
     uint8_t nodeType = (len >= 8)                    ? pkt->nodeType : 0;
     // extended fields present only in stage9+ firmware
@@ -471,6 +507,9 @@ static void handleRawUpload() {
 
   client.println("OK");
   client.stop();
+
+  // Blue flash per chunk received — safe to delay() here, we're in uploadTask on Core 0
+  nestLedFlash(false, false, true, 1, 80, 0);
 
   Serial.printf("[NEST] Saved %s chunk %d/%d (%u bytes)\n",
                 fileName.c_str(), chunkIndex + 1, totalChunks, (unsigned)written);
@@ -689,14 +728,21 @@ void setup() {
   delay(500);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. Nest — Stage 10");
-  Serial.println(" ESP-NOW + WiFi AP + Chunked Upload + Display");
+  Serial.println(" W.A.S.P. Nest — Stage 11");
+  Serial.println(" ESP-NOW + WiFi AP + Chunked Upload + RGB LED");
   Serial.println("========================================");
 
   pinMode(TFT_BACKLIGHT, OUTPUT);
   digitalWrite(TFT_BACKLIGHT, HIGH);
 
   tft.init();
+  // GPIO 4 (NEST_LED_R) is now free — TFT_RST pulse completed inside tft.init()
+  pinMode(NEST_LED_R, OUTPUT);
+  pinMode(NEST_LED_G, OUTPUT);
+  pinMode(NEST_LED_B, OUTPUT);
+  nestLedOff();
+  nestLedFlash(true, true, true, 3, 50, 50);  // white 3× — boot confirm
+
   tft.setRotation(0);
   tft.fillScreen(CLR_BG);
   drawHeader();
@@ -756,10 +802,14 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────────────────────
 
 void loop() {
-  // upload task runs on Core 0 — loop() handles display and housekeeping only
+  // upload task runs on Core 0 — loop() handles display, housekeeping, and LED flags
   static uint32_t lastRefresh = 0;
   static uint32_t lastClean   = 0;
   uint32_t now = millis();
+
+  // Consume LED flags set by callbacks — flash immediately, no stall in callback context
+  if (ledHeartbeatFlag) { ledHeartbeatFlag = false; nestLedFlash(false, true, false, 1, 50, 0); }
+  if (ledSyncFlag)      { ledSyncFlag      = false; nestLedFlash(false, true, false, 2, 80, 80); }
 
   if (now - lastRefresh >= 1000) {
     refreshDisplay();
