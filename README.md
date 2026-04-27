@@ -170,7 +170,7 @@ Brightness and on/off are set per-worker in `/worker.cfg` on the worker SD card 
 | 8 | Unified worker firmware — auto-detects Worker vs Drone mode at boot | ✅ Complete |
 | 9 | Hardened file sync — 8 KB log cap, RAM pre-buffer, path validation, TCP upload | ✅ Complete |
 | 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | ✅ Complete |
-| 11 | RGB LED status — replace OLED with single addressable LED; brightness + on/off in worker.cfg | Planned |
+| 11 | RGB LED status — replace OLED with single addressable LED; brightness + on/off in worker.cfg | ✅ Complete |
 
 ---
 
@@ -341,7 +341,9 @@ packet — useful for understanding worker range.
 ```
 /
 ├── stage11_rgb_led/               ← active firmware (flash this)
-│   ├── nest/nest.ino              ← CYD: display + AP + chunked TCP upload server
+│   ├── nest/
+│   │   ├── nest.ino               ← CYD: display + AP + chunked TCP upload server + RGB LED
+│   │   └── nest_types.h
 │   └── worker/worker.ino          ← C5: unified Worker/Drone + RGB LED status
 │
 └── learned/                       ← reference copies of all prior stages
