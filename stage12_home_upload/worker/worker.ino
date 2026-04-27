@@ -19,7 +19,9 @@
  *   SD SCK  →  D8 (GPIO8)    SPI SCK
  *   SD MISO →  D9 (GPIO9)    SPI MISO
  *   SD MOSI →  D10 (GPIO10)  SPI MOSI
- *   RGB LED →  D0 (GPIO3)    RMT — change LED_PIN for perfboard layouts
+ *   RGB LED →  D0 (GPIO3)    WS2812B data (ws2812 mode) / R-channel (rgb4pin mode)
+ *   LED G   →  D4 (GPIO23)   green — rgb4pin mode only (was OLED SDA, free since Stage 11)
+ *   LED B   →  D5 (GPIO24)   blue  — rgb4pin mode only (was OLED SCL, free since Stage 11)
  *
  * ── Arduino IDE settings ──────────────────────────────────────────────────────
  *   Tools > Board              > XIAO_ESP32C5
@@ -46,6 +48,7 @@
  * ── Worker config (worker.cfg on worker SD) ───────────────────────────────────
  *   ledEnabled=true      (true/false or 1/0)
  *   ledBrightness=40     (0–255)
+ *   ledType=ws2812       (ws2812 or rgb4pin)
  */
 
 #include <WiFi.h>
@@ -66,7 +69,7 @@ static const uint8_t NEST_MAC[6] = {0xA4, 0xF0, 0x0F, 0x5D, 0x96, 0xD4};
 
 #define WASP_PKT_SUMMARY   0x01
 #define WASP_PKT_HEARTBEAT 0x02
-#define WASP_FIRMWARE_VER  11
+#define WASP_FIRMWARE_VER  12
 
 typedef struct __attribute__((packed)) {
   uint8_t  type;
@@ -125,10 +128,13 @@ typedef struct __attribute__((packed)) {
 #define SD_MOSI  10
 
 // ── RGB LED ───────────────────────────────────────────────────────────────────
-// Change LED_PIN here when moving to a perfboard layout — this is the only
-// place that needs updating. D0 = GPIO3 on the XIAO Expansion Board.
-#define LED_PIN            3
-#define LED_COUNT          1
+// WS2812B mode (ledType=ws2812): single data pin via RMT.
+// 4-pin mode  (ledType=rgb4pin): three GPIO channels, common-cathode, active HIGH.
+// Change pins here for perfboard layouts — these are the only places to update.
+#define LED_PIN   3   // D0 — WS2812B data; also R-channel in rgb4pin mode
+#define LED_COUNT 1
+#define LED_PIN_G 23  // D4 — green in rgb4pin mode (was OLED SDA, free since Stage 11)
+#define LED_PIN_B 24  // D5 — blue  in rgb4pin mode (was OLED SCL, free since Stage 11)
 #define LOW_HEAP_THRESHOLD 30000
 
 // ── Scan timing ───────────────────────────────────────────────────────────────
@@ -206,9 +212,11 @@ static uint32_t cycleCount      = 0;
 static uint32_t lastHeartbeatMs = 0;
 
 // ── LED state ─────────────────────────────────────────────────────────────────
-static uint8_t ledBrightness = 40;   // overridden by worker.cfg
-static bool    ledEnabled    = true; // overridden by worker.cfg
-static bool    gpsFired      = false; // fire GPS-fix flash only once
+enum LedType { LED_WS2812, LED_RGB4PIN };
+static LedType ledType       = LED_WS2812; // overridden by worker.cfg
+static uint8_t ledBrightness = 40;         // overridden by worker.cfg
+static bool    ledEnabled    = true;       // overridden by worker.cfg
+static bool    gpsFired      = false;
 
 Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -217,24 +225,36 @@ TinyGPSPlus    gps;
 
 // ── RGB LED helpers ───────────────────────────────────────────────────────────
 
-static void ledOff() { led.clear(); led.show(); }
+static void ledOff() {
+  if (ledType == LED_RGB4PIN) {
+    analogWrite(LED_PIN, 0); analogWrite(LED_PIN_G, 0); analogWrite(LED_PIN_B, 0);
+  } else {
+    led.clear(); led.show();
+  }
+}
 
 static void ledSet(uint32_t colour) {
   if (!ledEnabled) { ledOff(); return; }
-  led.setBrightness(ledBrightness);
-  led.setPixelColor(0, colour);
-  led.show();
+  if (ledType == LED_RGB4PIN) {
+    uint8_t r = (colour >> 16) & 0xFF;
+    uint8_t g = (colour >>  8) & 0xFF;
+    uint8_t b =  colour        & 0xFF;
+    analogWrite(LED_PIN,   r * ledBrightness / 255);
+    analogWrite(LED_PIN_G, g * ledBrightness / 255);
+    analogWrite(LED_PIN_B, b * ledBrightness / 255);
+  } else {
+    led.setBrightness(ledBrightness);
+    led.setPixelColor(0, colour);
+    led.show();
+  }
 }
 
 static void ledFlash(uint32_t colour, int times, int onMs, int offMs) {
   if (!ledEnabled) return;
-  led.setBrightness(ledBrightness);
   for (int i = 0; i < times; i++) {
-    led.setPixelColor(0, colour);
-    led.show();
+    ledSet(colour);
     delay(onMs);
-    led.clear();
-    led.show();
+    ledOff();
     if (i < times - 1) delay(offMs);
   }
 }
@@ -517,11 +537,13 @@ static void loadWorkerConfig() {
     String val = line.substring(eq + 1); val.trim();
     if      (key == "ledEnabled")    ledEnabled    = (val == "true" || val == "1");
     else if (key == "ledBrightness") ledBrightness = (uint8_t)constrain(val.toInt(), 0, 255);
+    else if (key == "ledType")       ledType       = (val == "rgb4pin") ? LED_RGB4PIN : LED_WS2812;
   }
   cfg.close();
-  Serial.printf("[CFG] ledEnabled=%s  ledBrightness=%d\n",
-                ledEnabled ? "true" : "false", ledBrightness);
-  led.setBrightness(ledBrightness);
+  Serial.printf("[CFG] ledEnabled=%s  ledBrightness=%d  ledType=%s\n",
+                ledEnabled ? "true" : "false", ledBrightness,
+                ledType == LED_RGB4PIN ? "rgb4pin" : "ws2812");
+  if (ledType == LED_WS2812) led.setBrightness(ledBrightness);
 }
 
 // ── ESP-NOW ───────────────────────────────────────────────────────────────────
@@ -1099,8 +1121,21 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // LED up first so boot flash fires as early as possible
-  led.begin();
+  // ── SD + config first — ledType must be known before boot flash ──────────────
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  sdOk = SD.begin(SD_CS, SPI);
+  if (sdOk && !SD.exists("/logs")) SD.mkdir("/logs");
+  loadWorkerConfig();
+
+  // ── LED — init hardware for the configured type, then boot flash ──────────────
+  if (ledType == LED_WS2812) {
+    led.begin();
+    led.setBrightness(ledBrightness);
+  } else {
+    pinMode(LED_PIN,   OUTPUT); analogWrite(LED_PIN,   0);
+    pinMode(LED_PIN_G, OUTPUT); analogWrite(LED_PIN_G, 0);
+    pinMode(LED_PIN_B, OUTPUT); analogWrite(LED_PIN_B, 0);
+  }
   ledOff();
   ledBoot();
 
@@ -1125,14 +1160,6 @@ void setup() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setDuplicateFilter(true);
   pBLEScan->setMaxResults(0);
-
-  // ── Hardware detection ───────────────────────────────────────────────────────
-  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  sdOk = SD.begin(SD_CS, SPI);
-  if (sdOk && !SD.exists("/logs")) SD.mkdir("/logs");
-
-  // Load per-worker LED config from SD before detectGPS() uses the LED
-  loadWorkerConfig();
 
   gpsOk = detectGPS();
   if (gpsOk) ledGPSFix();
@@ -1167,7 +1194,8 @@ void setup() {
     if (sdOk) openLogFile();
   }
   Serial.printf(" │  Sync  :  every %d cycles             │\n", SYNC_EVERY);
-  Serial.printf(" │  LED   :  pin %d  bright %d           │\n", LED_PIN, ledBrightness);
+  Serial.printf(" │  LED   :  %-7s  bright %-3d          │\n",
+                ledType == LED_RGB4PIN ? "rgb4pin" : "ws2812", ledBrightness);
   Serial.println(" └─────────────────────────────────────┘\n");
 
   if (!droneMode && sdOk && hasPendingFiles()) {

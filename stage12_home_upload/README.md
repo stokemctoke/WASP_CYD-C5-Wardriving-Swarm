@@ -50,7 +50,7 @@ there are `.csv` files in `/logs/MACADDR/` waiting to go up. If so:
 | Upload success | Green | 2× flash |
 | Upload fail / home unreachable | Red | 3× flash |
 
-### wasp.cfg additions
+### wasp.cfg additions (Nest SD)
 
 ```
 # Home Wi-Fi — Nest connects here to upload to WiGLE and WDGWars
@@ -63,6 +63,16 @@ wigleBasicToken=YourWiGLEEncodedToken
 # WDGWars API key — wdgwars.pl → Profile → API Keys (64 hex chars)
 wdgwarsApiKey=0000000000000000000000000000000000000000000000000000000000000000
 ```
+
+### worker.cfg addition (Worker SD)
+
+```
+# LED type — choose at config time without recompiling
+ledType=ws2812    # ws2812  → WS2812B / SK6812 addressable LED on D0 (GPIO3)
+                  # rgb4pin → common-cathode 4-pin RGB: R=D0, G=D4 (GPIO23), B=D5 (GPIO24)
+```
+
+The `ledType` key is optional — defaults to `ws2812` if absent. Existing `ledEnabled` and `ledBrightness` work for both types.
 
 ---
 
