@@ -375,44 +375,79 @@ static void restoreNestAP() {
   Serial.println("[HOME] AP + ESP-NOW restored");
 }
 
-// Uploads a single CSV from SD to WiGLE via multipart POST.
-// Reads file into heap before connecting so SD+WiFi DMA coexistence is not an issue.
-static bool uploadFileToWigle(const String& path, const String& fileName) {
-  if (!cfg.wigleBasicToken[0]) return false;
-  File f = SD.open(path.c_str());
-  if (!f) return false;
+// Streams a file from SD as a multipart/form-data POST over HTTPS — no heap alloc for
+// the file content. Uses a 512-byte stack buffer; safe for files of any size.
+// The standard ESP32 (CYD, Xtensa) has no SD/WiFi DMA coexistence issue, so reading
+// from SD while the WiFi socket is open is safe here (unlike the ESP32-C5 worker).
+// Returns the HTTP status code, or -1 on connection/socket failure.
+static int streamMultipartPost(const char* host, const char* urlPath,
+                                const char* authHeader, const char* authValue,
+                                const String& filePath, const String& fileName) {
+  File f = SD.open(filePath.c_str());
+  if (!f) return -1;
   int sz = (int)f.size();
-  if (sz <= 0) { f.close(); return false; }
-  uint8_t* fileBuf = (uint8_t*)malloc(sz);
-  if (!fileBuf) { f.close(); Serial.println("[WIGLE] OOM"); return false; }
-  f.read(fileBuf, sz); f.close();
+  if (sz <= 0) { f.close(); return -1; }
+  f.close();
 
   const char* boundary = "WASPupload0123456789";
   String pre  = String("--") + boundary + "\r\n"
                 "Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n"
                 "Content-Type: text/csv\r\n\r\n";
   String post = String("\r\n--") + boundary + "--\r\n";
-  int total   = pre.length() + sz + post.length();
+  int total   = (int)pre.length() + sz + (int)post.length();
 
-  uint8_t* body = (uint8_t*)malloc(total);
-  if (!body) { free(fileBuf); Serial.println("[WIGLE] OOM body"); return false; }
-  int off = 0;
-  memcpy(body + off, pre.c_str(),  pre.length());  off += pre.length();
-  memcpy(body + off, fileBuf, sz);                  off += sz;
-  memcpy(body + off, post.c_str(), post.length());
-  free(fileBuf);
+  WiFiClientSecure wc; wc.setInsecure();
+  wc.setTimeout(60);  // 60-second socket timeout for large files
+  if (!wc.connect(host, 443)) {
+    Serial.printf("[UPLOAD] TCP connect to %s failed\n", host);
+    return -1;
+  }
 
-  WiFiClientSecure wc; wc.setInsecure();  // TODO: add root CA in future for cert validation
-  HTTPClient http;
-  http.begin(wc, "https://api.wigle.net/api/v2/file/upload");
-  http.addHeader("Authorization",  String("Basic ") + cfg.wigleBasicToken);
-  http.addHeader("Content-Type",   String("multipart/form-data; boundary=") + boundary);
-  http.addHeader("Accept",         "application/json");
-  http.setTimeout(20000);
-  Serial.printf("[WIGLE] Uploading %s (%d B)...\n", fileName.c_str(), total);
-  int code = http.POST(body, total);
-  if (code != 200) Serial.printf("[WIGLE] resp: %s\n", http.getString().c_str());
-  http.end(); free(body);
+  // HTTP request headers
+  wc.printf("POST %s HTTP/1.1\r\n", urlPath);
+  wc.printf("Host: %s\r\n", host);
+  wc.printf("%s: %s\r\n", authHeader, authValue);
+  wc.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary);
+  wc.printf("Content-Length: %d\r\n", total);
+  wc.printf("Accept: application/json\r\n");
+  wc.printf("Connection: close\r\n\r\n");
+
+  // Multipart header
+  wc.print(pre);
+
+  // Stream file body from SD in 512-byte chunks — no large malloc needed
+  File sf = SD.open(filePath.c_str());
+  if (!sf) { wc.stop(); return -1; }
+  uint8_t buf[512];
+  size_t  n;
+  uint32_t deadline = millis() + 120000UL;  // 2-minute body send deadline
+  while ((n = sf.read(buf, sizeof(buf))) > 0 && millis() < deadline) {
+    if (wc.write(buf, n) == 0) break;
+  }
+  sf.close();
+
+  // Multipart footer
+  wc.print(post);
+
+  // Read HTTP status line — e.g. "HTTP/1.1 200 OK"
+  String statusLine = wc.readStringUntil('\n');
+  statusLine.trim();
+  wc.stop();
+
+  int code = 0;
+  if (statusLine.startsWith("HTTP/")) {
+    int sp = statusLine.indexOf(' ');
+    if (sp > 0) code = statusLine.substring(sp + 1, sp + 4).toInt();
+  }
+  return code;
+}
+
+static bool uploadFileToWigle(const String& path, const String& fileName) {
+  if (!cfg.wigleBasicToken[0]) return false;
+  Serial.printf("[WIGLE] Uploading %s...\n", fileName.c_str());
+  String auth = String("Basic ") + cfg.wigleBasicToken;
+  int code = streamMultipartPost("api.wigle.net", "/api/v2/file/upload",
+                                  "Authorization", auth.c_str(), path, fileName);
   Serial.printf("[WIGLE] %s  HTTP %d\n", fileName.c_str(), code);
   return (code == 200);
 }
@@ -421,40 +456,9 @@ static bool uploadFileToWigle(const String& path, const String& fileName) {
 // Header: X-API-Key (64-char hex). Field: "file". Confirmed from wdgwars.pl/help/#api-docs.
 static bool uploadFileToWdgwars(const String& path, const String& fileName) {
   if (!cfg.wdgwarsApiKey[0]) return false;
-  File f = SD.open(path.c_str());
-  if (!f) return false;
-  int sz = (int)f.size();
-  if (sz <= 0) { f.close(); return false; }
-  uint8_t* fileBuf = (uint8_t*)malloc(sz);
-  if (!fileBuf) { f.close(); Serial.println("[WDG] OOM"); return false; }
-  f.read(fileBuf, sz); f.close();
-
-  const char* boundary = "WASPupload0123456789";
-  String pre  = String("--") + boundary + "\r\n"
-                "Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n"
-                "Content-Type: text/csv\r\n\r\n";
-  String post = String("\r\n--") + boundary + "--\r\n";
-  int total   = pre.length() + sz + post.length();
-
-  uint8_t* body = (uint8_t*)malloc(total);
-  if (!body) { free(fileBuf); return false; }
-  int off = 0;
-  memcpy(body + off, pre.c_str(),  pre.length());  off += pre.length();
-  memcpy(body + off, fileBuf, sz);                  off += sz;
-  memcpy(body + off, post.c_str(), post.length());
-  free(fileBuf);
-
-  WiFiClientSecure wc; wc.setInsecure();
-  HTTPClient http;
-  http.begin(wc, "https://wdgwars.pl/api/upload-csv");
-  http.addHeader("X-API-Key",    cfg.wdgwarsApiKey);
-  http.addHeader("Content-Type", String("multipart/form-data; boundary=") + boundary);
-  http.addHeader("Accept",       "application/json");
-  http.setTimeout(20000);
-  Serial.printf("[WDG] Uploading %s (%d B)...\n", fileName.c_str(), total);
-  int code = http.POST(body, total);
-  if (code != 200) Serial.printf("[WDG] resp: %s\n", http.getString().c_str());
-  http.end(); free(body);
+  Serial.printf("[WDG] Uploading %s...\n", fileName.c_str());
+  int code = streamMultipartPost("wdgwars.pl", "/api/upload-csv",
+                                  "X-API-Key", cfg.wdgwarsApiKey, path, fileName);
   Serial.printf("[WDG] %s  HTTP %d\n", fileName.c_str(), code);
   return (code == 200);
 }
