@@ -7,7 +7,7 @@
  *   WORKER — SD card found → logs to SD, GPS used if present
  *   DRONE  — no SD card   → logs to 25-slot RAM circular buffer
  *
- * Both modes sync to the Nest via HTTP upload every SYNC_EVERY cycles.
+ * Both modes sync to the Nest via HTTP upload every syncEvery cycles.
  * If the Nest is not in range, Drone data is retained in the buffer
  * (oldest slot overwritten first when full). Worker renames uploaded
  * files to .done as before.
@@ -50,16 +50,16 @@
  *   ledBrightness=40     (0–255)
  *   ledType=ws2812       (ws2812 or rgb4pin)
  *   ledBoot=FFFFFF,3,50,50                  (colour hex, flashes, onMs, offMs)
- *   ledGPSAcquire=FAA307,0,400,400          (0 flashes = continuous toggle)
- *   ledGPSFound=FAA307,4,400,300            (one-off burst after module confirmed)
- *   ledGPSFix=00FFFF,2,150,100
- *   ledScanCycle=FFFF00,1,100,0
- *   ledConnecting=4488FF,0,200,200          (0 flashes = continuous toggle)
+ *   ledGPSAcquire=FF3C00,0,400,400          (0 flashes = continuous toggle)
+ *   ledGPSFound=64FF00,4,400,300            (one-off burst after module confirmed)
+ *   ledGPSFix=64FF00,2,150,100
+ *   ledScanCycle=FFDC00,1,100,0
+ *   ledConnecting=FF6400,0,200,200          (0 flashes = continuous toggle)
  *   ledSyncOK=00FF00,2,150,100
  *   ledSyncFail=FF0000,3,80,80
- *   ledTooBig=FF6600,4,80,80
+ *   ledTooBig=FF6400,4,80,80
  *   ledLowHeap=FF0000,1,400,0
- *   ledDronePulse=00FFFF,2,200,100
+ *   ledDronePulse=0050FF,2,200,100
  *   ledHeartbeat=FF69B4,2,80,80
  */
 
@@ -120,34 +120,19 @@ typedef struct __attribute__((packed)) {
 } scan_summary_t;          // 52 bytes
 
 // ── Nest AP ───────────────────────────────────────────────────────────────────
-#define NEST_AP_SSID      "WASP-Nest"
-#define NEST_AP_PASS      "waspswarm"
-#define NEST_IP           "192.168.4.1"
-#define NEST_UPLOAD_URL   "http://192.168.4.1/upload"  // drone HTTP uploads (small CSV)
-#define NEST_UPLOAD_PORT  8080                          // worker raw TCP uploads
-#define SYNC_EVERY        25
+#define NEST_UPLOAD_PORT  8080   // worker raw TCP uploads — fixed, matches nest server
 
-// ── GPS ───────────────────────────────────────────────────────────────────────
-#define GPS_BAUD       9600
-#define GPS_RX_PIN     12
-#define GPS_TX_PIN     11
-#define GPS_DETECT_MS  2000
-
-// ── SD ────────────────────────────────────────────────────────────────────────
+// ── SD (SPI bus) ─────────────────────────────────────────────────────────────
+// Cannot be moved to SD config — SD must be mounted before config can be read.
 #define SD_CS    25
 #define SD_SCK    8
 #define SD_MISO   9
 #define SD_MOSI  10
 
-// ── RGB LED ───────────────────────────────────────────────────────────────────
-// WS2812B mode (ledType=ws2812): single data pin via RMT.
-// 4-pin mode  (ledType=rgb4pin): three GPIO channels, common-cathode, active HIGH.
-// Change pins here for perfboard layouts — these are the only places to update.
-#define LED_PIN   3   // D0 — WS2812B data; also R-channel in rgb4pin mode
-#define LED_COUNT 1
-#define LED_PIN_G 23  // D4 — green in rgb4pin mode (was OLED SDA, free since Stage 11)
-#define LED_PIN_B 24  // D5 — blue  in rgb4pin mode (was OLED SCL, free since Stage 11)
-#define LOW_HEAP_THRESHOLD 30000
+// ── LED count / internal GPS timing ──────────────────────────────────────────
+#define LED_COUNT     1
+#define GPS_DETECT_MS 2000
+#define GPS_FEED_MS   500
 
 // ── LED event descriptor ──────────────────────────────────────────────────────
 // Holds colour + timing for one named LED state.
@@ -159,26 +144,7 @@ struct LedEvent {
   int      offMs;
 };
 
-// ── Scan timing ───────────────────────────────────────────────────────────────
-#define GPS_FEED_MS      500
-#define WIFI_MS_PER_CHAN  80
-#define BLE_SCAN_MS     3000
-#define CYCLE_DELAY_MS  2000
-
-// ── Heartbeat ─────────────────────────────────────────────────────────────────
-#define HEARTBEAT_INTERVAL_MS 5000
-
-// ── Log file size cap ─────────────────────────────────────────────────────────
-// The C5's TCP send path stalls on payloads above ~9.5 KB (observed ceiling
-// during live testing). Cap is set well below that threshold so that even a
-// file that gets one final row written after the rotation check triggers stays
-// safely under the reliable limit. Files already on the SD that exceed this
-// cap are renamed .toobig and skipped; they can be recovered via chunked
-// upload (Stage 10) or by reading the SD card directly on a PC.
-#define MAX_LOG_BYTES 8192
-#define CHUNK_SIZE    MAX_LOG_BYTES  // max bytes per TCP transaction
-
-// ── RAM buffer (drone mode) ───────────────────────────────────────────────────
+// ── RAM buffer (drone mode) — fixed at compile time ──────────────────────────
 #define CYCLE_SLOTS        25
 #define MAX_WIFI_PER_SLOT  40
 #define MAX_BLE_PER_SLOT   20
@@ -242,20 +208,51 @@ static bool    gpsFired      = false;
 
 // Default values match the hardcoded behaviour from prior stages.
 // All overrideable via worker.cfg: ledBoot=RRGGBB,flashes,onMs,offMs
-static LedEvent evBoot       = { 0xFFFFFF, 3,   50,  50 };
-static LedEvent evGPSAcquire = { 0xFAA307, 0,  400, 400 }; // 0 = continuous toggle
-static LedEvent evGPSFound   = { 0xFAA307, 4,  400, 300 }; // prominent one-off after module confirmed
-static LedEvent evGPSFix     = { 0x00FFFF, 2,  150, 100 };
-static LedEvent evScanCycle  = { 0xFFFF00, 1,  100,   0 };
-static LedEvent evConnecting = { 0x4488FF, 0,  200, 200 }; // 0 = continuous toggle
-static LedEvent evSyncOK     = { 0x00FF00, 2,  150, 100 };
-static LedEvent evSyncFail   = { 0xFF0000, 3,   80,  80 };
-static LedEvent evTooBig     = { 0xFF6600, 4,   80,  80 };
-static LedEvent evLowHeap    = { 0xFF0000, 1,  400,   0 };
-static LedEvent evDronePulse = { 0x00FFFF, 2,  200, 100 };
-static LedEvent evHeartbeat  = { 0xFF69B4, 2,   80,  80 };
+static LedEvent evBoot       = { 0xFFFFFF, 3,   50,  50 }; // white  — startup / config loaded
+static LedEvent evGPSAcquire = { 0xFF3C00, 0,  400, 400 }; // amber  — acquiring GPS, no fix (continuous)
+static LedEvent evGPSFound   = { 0x64FF00, 4,  400, 300 }; // lime   — GPS fix first acquired
+static LedEvent evGPSFix     = { 0x64FF00, 2,  150, 100 }; // lime   — GPS has fix
+static LedEvent evScanCycle  = { 0xFFDC00, 1,  100,   0 }; // yellow — new network / scan cycle
+static LedEvent evConnecting = { 0xFF6400, 0,  200, 200 }; // orange — WiFi connecting (continuous)
+static LedEvent evSyncOK     = { 0x00FF00, 2,  150, 100 }; // green  — sync / WiFi OK
+static LedEvent evSyncFail   = { 0xFF0000, 3,   80,  80 }; // red    — sync failed
+static LedEvent evTooBig     = { 0xFF6400, 4,   80,  80 }; // orange — file too big
+static LedEvent evLowHeap    = { 0xFF0000, 1,  400,   0 }; // red    — low heap
+static LedEvent evDronePulse = { 0x0050FF, 2,  200, 100 }; // blue   — drone connection pulse
+static LedEvent evHeartbeat  = { 0xFF69B4, 2,   80,  80 }; // pink   — heartbeat / idle
 
-Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel led(LED_COUNT, 3, NEO_GRB + NEO_KHZ800); // pin overridden in setup() after config load
+
+// ── SD-configurable runtime settings ─────────────────────────────────────────
+// All overrideable via worker.cfg. Defaults match prior compiled behaviour.
+
+// Nest connection
+static char nestSsid[33] = "WASP-Nest";
+static char nestPsk[65]  = "waspswarm";
+static char nestIp[16]   = "192.168.4.1";
+
+// Sync behaviour
+static int syncEvery          = 25;    // sync to Nest every N scan cycles
+static int heartbeatIntervalMs = 5000; // ms between ESP-NOW heartbeats
+
+// Scan timing
+static int wifiChanMs  =  80;   // ms spent on each WiFi channel
+static int bleScanMs   = 3000;  // ms for each BLE scan pass
+static int cycleDelayMs = 2000; // ms delay at end of each cycle
+
+// Log file
+static int maxLogBytes      = 8192;  // rotate log file above this size
+static int lowHeapThreshold = 30000; // heap warning level in bytes
+
+// GPS
+static int gpsBaud   = 9600;
+static int gpsRxPin  =   12;  // XIAO C5 = D7
+static int gpsTxPin  =   11;  // XIAO C5 = D6
+
+// LED pins (WS2812 data / rgb4pin R, G, B)
+static int ledPin  =  3;  // D0
+static int ledPinG = 23;  // D4
+static int ledPinB = 24;  // D5
 
 HardwareSerial gpsSerial(1);
 TinyGPSPlus    gps;
@@ -264,7 +261,7 @@ TinyGPSPlus    gps;
 
 static void ledOff() {
   if (ledType == LED_RGB4PIN) {
-    analogWrite(LED_PIN, 0); analogWrite(LED_PIN_G, 0); analogWrite(LED_PIN_B, 0);
+    analogWrite(ledPin, 0); analogWrite(ledPinG, 0); analogWrite(ledPinB, 0);
   } else {
     led.clear(); led.show();
   }
@@ -276,9 +273,9 @@ static void ledSet(uint32_t colour) {
     uint8_t r = (colour >> 16) & 0xFF;
     uint8_t g = (colour >>  8) & 0xFF;
     uint8_t b =  colour        & 0xFF;
-    analogWrite(LED_PIN,   r * ledBrightness / 255);
-    analogWrite(LED_PIN_G, g * ledBrightness / 255);
-    analogWrite(LED_PIN_B, b * ledBrightness / 255);
+    analogWrite(ledPin,   r * ledBrightness / 255);
+    analogWrite(ledPinG, g * ledBrightness / 255);
+    analogWrite(ledPinB, b * ledBrightness / 255);
   } else {
     led.setBrightness(ledBrightness);
     led.setPixelColor(0, colour);
@@ -404,9 +401,9 @@ static void flushLog() {
 
 static void maybeFlush() {
   if (++linesSinceFlush >= 25 || (millis() - lastFlushMs) >= 2000) flushLog();
-  if (logFile && (int)logFile.size() >= MAX_LOG_BYTES) {
+  if (logFile && (int)logFile.size() >= maxLogBytes) {
     Serial.printf("[SD] Rotating log: %s reached %u B (cap %d)\n",
-                  logPath.c_str(), (unsigned)logFile.size(), MAX_LOG_BYTES);
+                  logPath.c_str(), (unsigned)logFile.size(), maxLogBytes);
     logFile.close();
     openLogFile();
   }
@@ -430,7 +427,7 @@ static bool openLogFile() {
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) { Serial.printf("[SD] Failed to open %s\n", logPath.c_str()); return false; }
   logFile.println("WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Worker,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0");
-  logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type");
+  logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type,RCOIs,MfgrId");
   logFile.flush();
   Serial.printf("[SD] Log: %s\n", logPath.c_str());
   return true;
@@ -464,7 +461,7 @@ static void logWiFiRow(const String& mac, const String& ssid, wifi_auth_mode_t a
   if (ts.isEmpty()) ts = "1970-01-01 00:00:00";
   String safe = ssid; safe.replace("\"", "\"\"");
   char line[256];
-  snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,%.6f,%.6f,%.0f,%.1f,,,WIFI",
+  snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,%.6f,%.6f,%.0f,%.1f,WIFI,,",
            mac.c_str(), safe.c_str(), wigleAuth(auth),
            ts.c_str(), channel, channelToFreq(channel), rssi, lat, lon, altM, accuracy);
   logFile.println(line);
@@ -480,7 +477,7 @@ static void logBLERow(const String& mac, const String& name, int rssi,
   char mfgrField[8] = "";
   if (hasMfgr) snprintf(mfgrField, sizeof(mfgrField), "%u", mfgrId);
   char line[256];
-  snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,%.6f,%.6f,%.0f,%.1f,,%s,BLE",
+  snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,%.6f,%.6f,%.0f,%.1f,BLE,,%s",
            mac.c_str(), safe.c_str(), ts.c_str(), rssi, lat, lon, altM, accuracy, mfgrField);
   logFile.println(line);
   maybeFlush();
@@ -527,7 +524,7 @@ static String buildCSV(int idx) {
   String csv;
   csv.reserve(2048);
   csv += "WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Drone,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0\n";
-  csv += "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n";
+  csv += "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type,RCOIs,MfgrId\n";
 
   for (int i = 0; i < s.wifiCount; i++) {
     const wifi_entry_t& w = s.wifi[i];
@@ -537,7 +534,7 @@ static String buildCSV(int idx) {
     String ssid = String(w.ssid);
     ssid.replace("\"", "\"\"");
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,0.000000,0.000000,0,999.9,,,WIFI",
+    snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,0.000000,0.000000,0,999.9,WIFI,,",
              bssid, ssid.c_str(), wigleAuth((wifi_auth_mode_t)w.auth),
              nowTimestamp().c_str(), w.channel, channelToFreq(w.channel), w.rssi);
     csv += line; csv += '\n';
@@ -553,7 +550,7 @@ static String buildCSV(int idx) {
     char mfgrField[8] = "";
     if (b.hasMfgr) snprintf(mfgrField, sizeof(mfgrField), "%u", b.mfgrId);
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,0.000000,0.000000,0,999.9,,%s,BLE",
+    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,0.000000,0.000000,0,999.9,BLE,,%s",
              addr, name.c_str(), nowTimestamp().c_str(), b.rssi, mfgrField);
     csv += line; csv += '\n';
   }
@@ -576,6 +573,13 @@ static bool parseLedEvent(const String& val, LedEvent& ev) {
 
 static void loadWorkerConfig() {
   if (!sdOk) return;
+
+  // If /reset.cfg exists on the SD card, skip worker.cfg entirely and boot on compiled defaults.
+  if (SD.exists("/reset.cfg")) {
+    Serial.println("[CFG] /reset.cfg found — using compiled defaults, worker.cfg ignored");
+    return;
+  }
+
   File cfg = SD.open("/worker.cfg");
   if (!cfg) return;
   while (cfg.available()) {
@@ -585,7 +589,12 @@ static void loadWorkerConfig() {
     int eq = line.indexOf('=');
     if (eq < 0) continue;
     String key = line.substring(0, eq); key.trim();
-    String val = line.substring(eq + 1); val.trim();
+    String val = line.substring(eq + 1);
+    int comment = val.indexOf('#');
+    if (comment >= 0) val = val.substring(0, comment);
+    val.trim();
+
+    // LED
     if      (key == "ledEnabled")    ledEnabled    = (val == "true" || val == "1");
     else if (key == "ledBrightness") ledBrightness = (uint8_t)constrain(val.toInt(), 0, 255);
     else if (key == "ledType")       ledType       = (val == "rgb4pin") ? LED_RGB4PIN : LED_WS2812;
@@ -601,12 +610,36 @@ static void loadWorkerConfig() {
     else if (key == "ledLowHeap")    parseLedEvent(val, evLowHeap);
     else if (key == "ledDronePulse") parseLedEvent(val, evDronePulse);
     else if (key == "ledHeartbeat")  parseLedEvent(val, evHeartbeat);
+    // LED pins
+    else if (key == "ledPin")        ledPin        = val.toInt();
+    else if (key == "ledPinG")       ledPinG       = val.toInt();
+    else if (key == "ledPinB")       ledPinB       = val.toInt();
+    // GPS
+    else if (key == "gpsBaud")       gpsBaud       = val.toInt();
+    else if (key == "gpsRxPin")      gpsRxPin      = val.toInt();
+    else if (key == "gpsTxPin")      gpsTxPin      = val.toInt();
+    // Nest connection
+    else if (key == "nestSsid")      val.toCharArray(nestSsid, sizeof(nestSsid));
+    else if (key == "nestPsk")       val.toCharArray(nestPsk,  sizeof(nestPsk));
+    else if (key == "nestIp")        val.toCharArray(nestIp,   sizeof(nestIp));
+    // Sync & timing
+    else if (key == "syncEvery")           syncEvery           = max(1, (int)val.toInt());
+    else if (key == "heartbeatIntervalMs") heartbeatIntervalMs = max(1000, (int)val.toInt());
+    else if (key == "wifiChanMs")          wifiChanMs          = constrain(val.toInt(), 20, 500);
+    else if (key == "bleScanMs")           bleScanMs           = constrain(val.toInt(), 500, 10000);
+    else if (key == "cycleDelayMs")        cycleDelayMs        = max(0, (int)val.toInt());
+    // Log & memory
+    else if (key == "maxLogBytes")      maxLogBytes      = constrain(val.toInt(), 1024, 65536);
+    else if (key == "lowHeapThreshold") lowHeapThreshold = max(8192, (int)val.toInt());
   }
   cfg.close();
-  Serial.printf("[CFG] ledEnabled=%s  ledBrightness=%d  ledType=%s\n",
-                ledEnabled ? "true" : "false", ledBrightness,
-                ledType == LED_RGB4PIN ? "rgb4pin" : "ws2812");
-  if (ledType == LED_WS2812) led.setBrightness(ledBrightness);
+  Serial.printf("[CFG] led=%s/%d/%s  nest=%s  sync=%d  wifiChan=%dms  ble=%dms  cycle=%dms\n",
+                ledEnabled ? "on" : "off", ledBrightness,
+                ledType == LED_RGB4PIN ? "rgb4pin" : "ws2812",
+                nestSsid, syncEvery, wifiChanMs, bleScanMs, cycleDelayMs);
+  Serial.printf("[CFG] gps=%dbaud rx=%d tx=%d  ledPin=%d,%d,%d  maxLog=%dB  heap=%dB\n",
+                gpsBaud, gpsRxPin, gpsTxPin, ledPin, ledPinG, ledPinB,
+                maxLogBytes, lowHeapThreshold);
 }
 
 // ── ESP-NOW ───────────────────────────────────────────────────────────────────
@@ -623,7 +656,7 @@ static void sendHeartbeat() {
 }
 
 static void maybeHeartbeat() {
-  if (millis() - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) sendHeartbeat();
+  if (millis() - lastHeartbeatMs >= heartbeatIntervalMs) sendHeartbeat();
 }
 
 static void onSendResult(const wifi_tx_info_t*, esp_now_send_status_t status) {
@@ -690,7 +723,7 @@ static bool connectToNest() {
   delay(50);
   esp_now_deinit();
   WiFi.mode(WIFI_STA);
-  WiFi.begin(NEST_AP_SSID, NEST_AP_PASS);
+  WiFi.begin(nestSsid, nestPsk);
   unsigned long t0       = millis();
   unsigned long lastLedMs = 0;
   bool          ledOn    = false;
@@ -720,22 +753,22 @@ static void disconnectFromNest() {
   sendHeartbeat();           // announce return immediately after ESP-NOW is back
 }
 
-// Uploads a file in CHUNK_SIZE segments — each chunk is a separate TCP
+// Uploads a file in maxLogBytes segments — each chunk is a separate TCP
 // connection so WiFi is fully down while reading the next chunk from SD.
 static bool uploadFileChunked(const String& path, const String& name, int fileSize) {
-  int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-  Serial.printf("[SYNC]  chunked: %d chunk(s) × up to %d B\n", totalChunks, CHUNK_SIZE);
+  int totalChunks = (fileSize + maxLogBytes - 1) / maxLogBytes;
+  Serial.printf("[SYNC]  chunked: %d chunk(s) × up to %d B\n", totalChunks, maxLogBytes);
 
-  uint8_t* buf = (uint8_t*)malloc(CHUNK_SIZE);
+  uint8_t* buf = (uint8_t*)malloc(maxLogBytes);
   if (!buf) {
-    Serial.printf("[OOM for %d B chunk buf]\n", CHUNK_SIZE);
+    Serial.printf("[OOM for %d B chunk buf]\n", maxLogBytes);
     return false;
   }
 
   bool allOk = true;
   for (int ci = 0; ci < totalChunks && allOk; ci++) {
-    int offset    = ci * CHUNK_SIZE;
-    int chunkSize = min(fileSize - offset, CHUNK_SIZE);
+    int offset    = ci * maxLogBytes;
+    int chunkSize = min(fileSize - offset, maxLogBytes);
 
     // ── Read chunk while WiFi is OFF ──────────────────────────────────────────
     {
@@ -757,16 +790,15 @@ static bool uploadFileChunked(const String& path, const String& name, int fileSi
       }
     }
 
-    // ── Connect, upload chunk, disconnect ─────────────────────────────────────
+    // ── Upload chunk over the already-open nest WiFi association ─────────────
+    // Caller is responsible for connectToNest() before / disconnectFromNest() after.
     Serial.printf("         chunk %d/%d  %d B  ...", ci + 1, totalChunks, chunkSize);
-    if (!connectToNest()) { Serial.println("[nest unreachable]"); allOk = false; break; }
 
     String myMac = WiFi.macAddress(); myMac.replace(":", "");
-    Serial.printf("[%s]", WiFi.localIP().toString().c_str());
 
     WiFiClient tcp;
     bool chunkOk = false;
-    if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
+    if (tcp.connect(nestIp, NEST_UPLOAD_PORT)) {
       tcp.setNoDelay(true);
       tcp.setTimeout(5000);
       tcp.printf("UPLOAD_CHUNK %s %s %d %d %d\n",
@@ -794,10 +826,9 @@ static bool uploadFileChunked(const String& path, const String& name, int fileSi
       Serial.print("[tcp FAIL]");
     }
     tcp.stop();
-    disconnectFromNest();
     Serial.println(chunkOk ? " OK" : " FAILED");
     if (!chunkOk) allOk = false;
-    if (ci < totalChunks - 1) delay(300);
+    if (ci < totalChunks - 1) delay(50);
   }
 
   free(buf);
@@ -834,33 +865,60 @@ static void syncFiles() {
   // SD+WiFi DMA coexistence on the ESP32-C5 is unreliable mid-transfer:
   // f.read() hangs after the first chunk once the WiFi stack is active.
   // Fix: read the whole file into RAM while WiFi is OFF, then connect and
-  // stream from the buffer. OOM files are deferred and retried after 25
-  // scan cycles once the heap has settled.
-  for (int pass = 0; pass < 200; pass++) {
-
-    // ── Find next pending .csv (WiFi off, SD safe) ──────────────────────────
-    String name, path;
-    int sz = 0;
-    {
-      File dir = SD.open("/logs");
-      if (!dir) break;
-      bool found = false;
-      while (true) {
+  // stream from the buffer. OOM files are deferred and retried next sync.
+  //
+  // Scan /logs/ once upfront — avoids re-walking all .done entries on every
+  // file (O(n) not O(n²) when many completed files accumulate on the card).
+  const int MAX_QUEUE = 100;
+  String queueName[MAX_QUEUE];
+  int    queueSize[MAX_QUEUE];
+  int    queueLen = 0;
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (queueLen < MAX_QUEUE) {
         File entry = dir.openNextFile();
         if (!entry) break;
         String n = String(entry.name());
-        bool   d = entry.isDirectory();
-        int    s = (int)entry.size();
+        bool d = entry.isDirectory();
+        int s = (int)entry.size();
         entry.close();
-        if (!d && n.endsWith(".csv") && s > 0) { name = n; sz = s; found = true; break; }
+        if (!d && n.endsWith(".csv") && s > 0) {
+          queueName[queueLen] = n;
+          queueSize[queueLen] = s;
+          queueLen++;
+        }
       }
       dir.close();
-      if (!found) break;
-      path = name.startsWith("/") ? name : "/logs/" + name;
     }
+  }
+  Serial.printf("[SYNC] %d file(s) queued\n", queueLen);
+
+  // ── Connect to nest ONCE, hold the association across all files ────────────
+  // Previously we connected/disconnected per file (and per chunk!), burning
+  // ~5 s of WiFi handshake overhead on every transfer. One association is
+  // enough — TCP sockets are cheap to open over an existing WiFi link.
+  // nestAttempted tracks whether connectToNest() was called so we always
+  // call disconnectFromNest() to restore ESP-NOW even on a failed connect.
+  bool nestAttempted = false;
+  if (queueLen > 0) {
+    nestAttempted = true;
+    if (!connectToNest()) {
+      Serial.println("[SYNC] Nest WiFi unreachable — aborting sync");
+      // Fall through to deferred-restore + log-reopen at the end of syncFiles().
+      queueLen = 0;
+    } else {
+      Serial.printf("[SYNC] Connected  IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+  }
+
+  for (int qi = 0; qi < queueLen; qi++) {
+    String name = queueName[qi];
+    int    sz   = queueSize[qi];
+    String path = name.startsWith("/") ? name : "/logs/" + name;
 
     // ── Route by size: small → single-shot, large → chunked ─────────────────
-    if (sz > CHUNK_SIZE) {
+    if (sz > maxLogBytes) {
       Serial.printf("[SYNC]  %-32s  %5d B\n", name.c_str(), sz);
       bool ok = uploadFileChunked(path, name, sz);
       if (ok) {
@@ -871,13 +929,15 @@ static void syncFiles() {
         SD.rename(path.c_str(), (path + ".defer").c_str());
         Serial.printf("[SYNC]  %s → .defer\n", name.c_str()); failed++;
       }
-      delay(500);
+      delay(50);
       continue;
     }
 
     Serial.printf("[SYNC]  %-32s  %5d B  ...", name.c_str(), sz);
 
-    // ── Pre-buffer entire file from SD while WiFi is off ─────────────────────
+    // ── Pre-buffer entire file from SD ─────────────────────────────────────
+    // SD/WiFi DMA coexistence on ESP32-C5: f.read() can hang once WiFi is
+    // active. Reading the whole file into RAM up front side-steps that.
     uint8_t* fileBuf = (uint8_t*)malloc(sz);
     if (!fileBuf) {
       Serial.printf("[OOM %dB] — deferred\n", sz);
@@ -905,17 +965,15 @@ static void syncFiles() {
       }
     }
 
-    // ── Connect and stream from RAM — no SD access during WiFi ───────────────
-    bool nestOk  = connectToNest();
+    // ── Stream over the existing nest WiFi association ───────────────────────
     bool ok      = false;
     int  sent    = 0;
     bool tcpFail = false;
-    if (nestOk) {
+    {
       String myMac = WiFi.macAddress(); myMac.replace(":", "");
-      Serial.printf(" [%s]", WiFi.localIP().toString().c_str());
       WiFiClient tcp;
       Serial.print(" tcp..");
-      if (tcp.connect(NEST_IP, NEST_UPLOAD_PORT)) {
+      if (tcp.connect(nestIp, NEST_UPLOAD_PORT)) {
         tcp.setNoDelay(true);
         tcp.setTimeout(5000);
         Serial.print("OK hdr..");
@@ -950,12 +1008,14 @@ static void syncFiles() {
       tcp.stop();
     }
     free(fileBuf);
-    disconnectFromNest();
 
     if (ok) {
       SD.rename(path.c_str(), (path + ".done").c_str());
       Serial.printf(" OK\n"); uploaded++;
-    } else if (!nestOk || tcpFail) {
+    } else if (tcpFail) {
+      // Nest AP still associated but its TCP server isn't responding — likely
+      // restarting, busy with home upload, or moved out of range. Stop now,
+      // restore deferred files at the end of syncFiles, retry next cycle.
       Serial.println("\n[SYNC] Nest TCP not reachable — stopping");
       break;
     } else {
@@ -963,8 +1023,13 @@ static void syncFiles() {
       SD.rename(path.c_str(), (path + ".defer").c_str());
       failed++;
     }
-    delay(500);
+    delay(50);
   }
+
+  // ── Disconnect from nest ONCE after all files attempted ────────────────────
+  // Always call disconnectFromNest() if we called connectToNest() — it re-inits
+  // ESP-NOW and clears the WiFi STA state so subsequent scans work correctly.
+  if (nestAttempted) disconnectFromNest();
 
   // ── Restore deferred files for retry next sync ───────────────────────────
   {
@@ -1026,7 +1091,7 @@ static void syncBuffer() {
     Serial.printf("[SYNC]  slot %2d  %-28s  %5d B  ...", i, fileName, csv.length());
 
     HTTPClient http;
-    http.begin(String(NEST_UPLOAD_URL) + "?worker=" + myMac + "&file=" + fileName);
+    http.begin("http://" + String(nestIp) + "/upload?worker=" + myMac + "&file=" + fileName);
     http.addHeader("Content-Type", "text/csv");
     int code = http.POST(csv);
     http.end();
@@ -1062,7 +1127,7 @@ static const char* authTypeStr(wifi_auth_mode_t auth) {
 WiFiScanResult runWiFiScan() {
   Serial.println("\n[WORKER] Starting WiFi scan (2.4 GHz + 5 GHz)...");
   WiFi.setBandMode(WIFI_BAND_MODE_AUTO);
-  int n = WiFi.scanNetworks(false, true, false, WIFI_MS_PER_CHAN);
+  int n = WiFi.scanNetworks(false, true, false, wifiChanMs);
 
   WiFiScanResult r = {0, 0, 0, -127};
   if (n == WIFI_SCAN_FAILED || n < 0) { Serial.println("[WORKER] WiFi scan failed"); return r; }
@@ -1138,13 +1203,13 @@ class BLEScanCallbacks : public NimBLEScanCallbacks {
 static NimBLEScan* pBLEScan = nullptr;
 
 int runBLEScan() {
-  Serial.printf("\n[WORKER] Starting BLE scan (%d ms)...\n", BLE_SCAN_MS);
+  Serial.printf("\n[WORKER] Starting BLE scan (%d ms)...\n", bleScanMs);
   Serial.println("  RSSI  Address                 Name");
   Serial.println("  ----  -------                 ----");
 
   bleResults.clear();
   pBLEScan->clearResults();
-  pBLEScan->start(BLE_SCAN_MS, false, false);
+  pBLEScan->start(bleScanMs, false, false);
 
   while (pBLEScan->isScanning()) {
     if (gpsOk) while (gpsSerial.available()) gps.encode(gpsSerial.read());
@@ -1193,22 +1258,23 @@ void setup() {
 
   // ── LED — init hardware for the configured type, then boot flash ──────────────
   if (ledType == LED_WS2812) {
+    led.setPin(ledPin);  // apply pin override from config before RMT init
     led.begin();
     led.setBrightness(ledBrightness);
   } else {
-    pinMode(LED_PIN,   OUTPUT); analogWrite(LED_PIN,   0);
-    pinMode(LED_PIN_G, OUTPUT); analogWrite(LED_PIN_G, 0);
-    pinMode(LED_PIN_B, OUTPUT); analogWrite(LED_PIN_B, 0);
+    pinMode(ledPin,  OUTPUT); analogWrite(ledPin,  0);
+    pinMode(ledPinG, OUTPUT); analogWrite(ledPinG, 0);
+    pinMode(ledPinB, OUTPUT); analogWrite(ledPinB, 0);
   }
   ledOff();
   ledBoot();
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. — Stage 13  LED Config");
+  Serial.println(" W.A.S.P. — Stage 14  SD Config");
   Serial.println("========================================");
 
   gpsSerial.setRxBufferSize(512);
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  gpsSerial.begin(gpsBaud, SERIAL_8N1, gpsRxPin, gpsTxPin);
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -1257,7 +1323,7 @@ void setup() {
     Serial.printf(" │  GPS   :  %s                    │\n", gpsOk ? "detected" : "not found");
     if (sdOk) openLogFile();
   }
-  Serial.printf(" │  Sync  :  every %d cycles             │\n", SYNC_EVERY);
+  Serial.printf(" │  Sync  :  every %d cycles             │\n", syncEvery);
   Serial.printf(" │  LED   :  %-7s  bright %-3d          │\n",
                 ledType == LED_RGB4PIN ? "rgb4pin" : "ws2812", ledBrightness);
   Serial.println(" └─────────────────────────────────────┘\n");
@@ -1278,7 +1344,7 @@ void loop() {
   maybeHeartbeat();
 
   // Heap warning — fires once per cycle while heap is low
-  if (ESP.getFreeHeap() < LOW_HEAP_THRESHOLD) {
+  if (ESP.getFreeHeap() < lowHeapThreshold) {
     Serial.printf("[WARN] Low heap: %u B\n", (unsigned)ESP.getFreeHeap());
     ledLowHeap();
   }
@@ -1304,11 +1370,11 @@ void loop() {
   sendSummary(wifi.total, wifi.g2, wifi.g5, ble, wifi.bestRssi);
   cycleCount++;
 
-  if (cycleCount % SYNC_EVERY == 0) {
+  if (cycleCount % syncEvery == 0) {
     if (droneMode) syncBuffer();
     else           syncFiles();
   }
 
   Serial.println("\n[WORKER] Waiting before next cycle...");
-  delay(CYCLE_DELAY_MS);
+  delay(cycleDelayMs);
 }

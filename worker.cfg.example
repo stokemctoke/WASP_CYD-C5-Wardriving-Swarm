@@ -1,25 +1,62 @@
 # W.A.S.P. Worker configuration
 # Place on the worker's own SD card as /worker.cfg
 # Lines starting with # are comments. No spaces around = signs.
+# Inline comments (after a value) are also supported.
+#
+# FACTORY RESET: place a file called /reset.cfg on the SD card (any content or empty).
+# The worker will ignore worker.cfg entirely and boot on compiled-in defaults.
+# Remove /reset.cfg once you are ready to use your config again.
 
-# RGB LED
-ledEnabled=true          # true/false or 1/0 — disables all LED output when false
+# ── RGB LED ───────────────────────────────────────────────────────────────────
+ledEnabled=true          # true/false — disables all LED output when false
 ledBrightness=40         # 0–255 — 40 is comfortably visible without being blinding
 ledType=ws2812           # ws2812  → addressable WS2812B/SK6812 on D0 (GPIO3) via RMT
-                         # rgb4pin → common-cathode 4-pin RGB: R=D0, G=D4, B=D5
+                         # rgb4pin → common-cathode 4-pin RGB: R=ledPin, G=ledPinG, B=ledPinB
 
-# LED event colours and timing — format: RRGGBB,flashes,onMs,offMs
+# ── LED pins ──────────────────────────────────────────────────────────────────
+# Override for non-XIAO-C5 boards or custom wiring.
+# XIAO C5 defaults shown. Pins are GPIO numbers, not D-label numbers.
+#ledPin=3                # WS2812 data pin / rgb4pin RED channel  (XIAO C5: D0)
+#ledPinG=23              # rgb4pin GREEN channel                  (XIAO C5: D4)
+#ledPinB=24              # rgb4pin BLUE channel                   (XIAO C5: D5)
+
+# ── GPS ───────────────────────────────────────────────────────────────────────
+# Override for non-XIAO-C5 boards or different UART wiring.
+#gpsBaud=9600            # GPS module baud rate
+#gpsRxPin=12             # ESP32 RX pin (receives GPS TX)  (XIAO C5: D7)
+#gpsTxPin=11             # ESP32 TX pin (sends to GPS RX)  (XIAO C5: D6)
+
+# ── Nest connection ───────────────────────────────────────────────────────────
+# Must match wasp.cfg apSsid / apPsk on the Nest.
+#nestSsid=WASP-Nest
+#nestPsk=waspswarm
+#nestIp=192.168.4.1
+
+# ── Scan timing ───────────────────────────────────────────────────────────────
+#syncEvery=25            # sync files to Nest every N scan cycles
+#wifiChanMs=80           # ms spent on each WiFi channel during scan
+#bleScanMs=3000          # ms for each BLE scan pass
+#cycleDelayMs=2000       # ms delay at end of each scan cycle
+
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+#heartbeatIntervalMs=5000  # ms between ESP-NOW heartbeats sent to Nest
+
+# ── Log file ──────────────────────────────────────────────────────────────────
+#maxLogBytes=8192        # rotate log file above this size (bytes, 1024–65536)
+#lowHeapThreshold=30000  # free heap warning level in bytes
+
+# ── LED event colours and timing — format: RRGGBB,flashes,onMs,offMs ──────────
 # Omit any line to keep the compiled-in default.
-# flashes=0 on ledGPSAcquire and ledConnecting means continuous toggle (those are loop-based).
-#ledBoot=FFFFFF,3,50,50
-#ledGPSAcquire=FAA307,0,400,400
-#ledGPSFound=FAA307,4,400,300
-#ledGPSFix=00FFFF,2,150,100
-#ledScanCycle=FFFF00,1,100,0
-#ledConnecting=4488FF,0,200,200
-#ledSyncOK=00FF00,2,150,100
-#ledSyncFail=FF0000,3,80,80
-#ledTooBig=FF6600,4,80,80
-#ledLowHeap=FF0000,1,400,0
-#ledDronePulse=00FFFF,2,200,100
-#ledHeartbeat=FF69B4,2,80,80
+# flashes=0 on ledGPSAcquire and ledConnecting means continuous toggle (loop-based).
+#ledBoot=FFFFFF,3,50,50          # white  — startup / config loaded
+#ledGPSAcquire=FF3C00,0,400,400  # amber  — acquiring GPS, no fix yet (continuous)
+#ledGPSFound=64FF00,4,400,300    # lime   — GPS fix first acquired
+#ledGPSFix=64FF00,2,150,100      # lime   — GPS has fix
+#ledScanCycle=FFDC00,1,100,0     # yellow — new network / scan cycle
+#ledConnecting=FF6400,0,200,200  # orange — WiFi connecting (continuous)
+#ledSyncOK=00FF00,2,150,100      # green  — sync / WiFi OK
+#ledSyncFail=FF0000,3,80,80      # red    — sync failed
+#ledTooBig=FF6400,4,80,80        # orange — file too big
+#ledLowHeap=FF0000,1,400,0       # red    — low heap
+#ledDronePulse=0050FF,2,200,100  # blue   — drone connection pulse
+#ledHeartbeat=FF69B4,2,80,80     # pink   — heartbeat / idle

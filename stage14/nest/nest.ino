@@ -50,6 +50,17 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+
+// ── Nest LED event descriptor ─────────────────────────────────────────────────
+// Colour is 24-bit hex; R/G/B channels are binary (non-zero = on) since the
+// CYD onboard LED has no PWM. flashes=0 = solid on (for upload-in-progress).
+struct LedEvent {
+  uint32_t colour;
+  int      flashes;
+  int      onMs;
+  int      offMs;
+};
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 #define TFT_BACKLIGHT  21
@@ -161,10 +172,24 @@ struct wasp_config_t {
 
 static wasp_config_t cfg = {};   // zero-init; defaults applied in loadConfig()
 
+// ── Nest LED event defaults (overridden by wasp.cfg at boot) ─────────────────
+static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 }; // white   — startup / config loaded
+static LedEvent evNestHeartbeat  = { 0xFF69B4, 2,  80,  80 }; // pink    — heartbeat / idle
+static LedEvent evNestChunk      = { 0x0050FF, 1,  80,   0 }; // blue    — receiving chunk from worker
+static LedEvent evNestUploadAct  = { 0xFF00B4, 0,   0,   0 }; // magenta — solid while uploading
+static LedEvent evNestUploadOK   = { 0x64FF00, 2, 200, 200 }; // lime    — upload success
+static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 }; // red     — upload failed
+
 static bool loadConfig() {
   // Defaults — overridden by wasp.cfg if present
   strlcpy(cfg.apSsid, "WASP-Nest", sizeof(cfg.apSsid));
   strlcpy(cfg.apPsk,  "waspswarm", sizeof(cfg.apPsk));
+
+  // If /reset.cfg exists, skip wasp.cfg entirely and boot on compiled defaults.
+  if (SD.exists("/reset.cfg")) {
+    Serial.println("[CFG] /reset.cfg found — using compiled defaults, wasp.cfg ignored");
+    return false;
+  }
 
   File f = SD.open("/wasp.cfg");
   if (!f) {
@@ -260,23 +285,6 @@ static void nestLedFlash(bool r, bool g, bool b, int times, int onMs, int offMs)
   }
 }
 
-// ── Nest LED event descriptor ─────────────────────────────────────────────────
-// Colour is 24-bit hex; R/G/B channels are binary (non-zero = on) since the
-// CYD onboard LED has no PWM. flashes=0 = solid on (for upload-in-progress).
-struct LedEvent {
-  uint32_t colour;
-  int      flashes;
-  int      onMs;
-  int      offMs;
-};
-
-static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 };
-static LedEvent evNestHeartbeat  = { 0xFF00FF, 2,  80,  80 };
-static LedEvent evNestChunk      = { 0x0000FF, 1,  80,   0 };
-static LedEvent evNestUploadAct  = { 0x00FFFF, 0,   0,   0 }; // solid while uploading
-static LedEvent evNestUploadOK   = { 0x00FF00, 2, 200, 200 };
-static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 };
-
 static void nestLedFlashEvent(const LedEvent& ev) {
   bool r = ((ev.colour >> 16) & 0xFF) > 0;
   bool g = ((ev.colour >>  8) & 0xFF) > 0;
@@ -367,89 +375,281 @@ static void restoreNestAP() {
   Serial.println("[HOME] AP + ESP-NOW restored");
 }
 
-// Uploads a single CSV from SD to WiGLE via multipart POST.
-// Reads file into heap before connecting so SD+WiFi DMA coexistence is not an issue.
-static bool uploadFileToWigle(const String& path, const String& fileName) {
-  if (!cfg.wigleBasicToken[0]) return false;
-  File f = SD.open(path.c_str());
-  if (!f) return false;
+// Streams a file from SD as a multipart/form-data POST over HTTPS — no heap alloc for
+// the file content. Uses a 512-byte stack buffer; safe for files of any size.
+// The standard ESP32 (CYD, Xtensa) has no SD/WiFi DMA coexistence issue, so reading
+// from SD while the WiFi socket is open is safe here (unlike the ESP32-C5 worker).
+// Returns the HTTP status code, or -1 on connection/socket failure.
+// Robust write — loops over partial writes. Returns true iff every byte made it
+// out, false if the connection died mid-send. Without this, WiFiClientSecure
+// can return less than `len` (TLS record full, send-window stalled, etc.) and
+// we silently truncate the request body — Content-Length then mismatches the
+// real bytes sent and the server hangs waiting for the rest.
+static bool writeAll(WiFiClientSecure& wc, const uint8_t* data, size_t len, size_t& sentOut) {
+  size_t offset = 0;
+  uint32_t lastProgress = millis();
+  while (offset < len) {
+    if (!wc.connected()) return false;
+    int w = wc.write(data + offset, len - offset);
+    if (w > 0) {
+      offset += w;
+      sentOut += w;
+      lastProgress = millis();
+    } else if (w == 0) {
+      // No room in the TLS send buffer right now — yield and retry.
+      if (millis() - lastProgress > 30000) return false;  // 30 s stall = give up
+      delay(10);
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+static int streamMultipartPost(const char* host, const char* urlPath,
+                                const char* authHeader, const char* authValue,
+                                const String& filePath, const String& fileName) {
+  File f = SD.open(filePath.c_str());
+  if (!f) { Serial.println("[UPLOAD] SD open failed"); return -1; }
   int sz = (int)f.size();
-  if (sz <= 0) { f.close(); return false; }
-  uint8_t* fileBuf = (uint8_t*)malloc(sz);
-  if (!fileBuf) { f.close(); Serial.println("[WIGLE] OOM"); return false; }
-  f.read(fileBuf, sz); f.close();
+  if (sz <= 0) { f.close(); Serial.println("[UPLOAD] empty file"); return -1; }
+  f.close();
 
   const char* boundary = "WASPupload0123456789";
   String pre  = String("--") + boundary + "\r\n"
                 "Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n"
                 "Content-Type: text/csv\r\n\r\n";
   String post = String("\r\n--") + boundary + "--\r\n";
-  int total   = pre.length() + sz + post.length();
+  int total   = (int)pre.length() + sz + (int)post.length();
 
-  uint8_t* body = (uint8_t*)malloc(total);
-  if (!body) { free(fileBuf); Serial.println("[WIGLE] OOM body"); return false; }
-  int off = 0;
-  memcpy(body + off, pre.c_str(),  pre.length());  off += pre.length();
-  memcpy(body + off, fileBuf, sz);                  off += sz;
-  memcpy(body + off, post.c_str(), post.length());
-  free(fileBuf);
+  Serial.printf("[UPLOAD] %s%s  body=%d B (pre=%d + file=%d + post=%d)\n",
+                host, urlPath, total, (int)pre.length(), sz, (int)post.length());
+  Serial.printf("[UPLOAD] heap before TLS: %u\n", ESP.getFreeHeap());
 
-  WiFiClientSecure wc; wc.setInsecure();  // TODO: add root CA in future for cert validation
-  HTTPClient http;
-  http.begin(wc, "https://api.wigle.net/api/v2/file/upload");
-  http.addHeader("Authorization",  String("Basic ") + cfg.wigleBasicToken);
-  http.addHeader("Content-Type",   String("multipart/form-data; boundary=") + boundary);
-  http.addHeader("Accept",         "application/json");
-  http.setTimeout(20000);
-  int code = http.POST(body, total);
-  if (code != 200) Serial.printf("[WIGLE] resp: %s\n", http.getString().c_str());
-  http.end(); free(body);
+  WiFiClientSecure wc; wc.setInsecure();
+  wc.setTimeout(30);   // socket-level read/write timeout in seconds
+
+  uint32_t tConnect = millis();
+  if (!wc.connect(host, 443)) {
+    Serial.printf("[UPLOAD] TLS connect to %s failed (lastError=%d)\n", host, wc.lastError(NULL, 0));
+    return -1;
+  }
+  Serial.printf("[UPLOAD] TLS connected in %lu ms\n", (unsigned long)(millis() - tConnect));
+
+  // HTTP request headers — build into a single String so we can verify the
+  // write succeeded in one shot rather than sprayed across many printfs.
+  String hdr;
+  hdr.reserve(256);
+  hdr  = String("POST ") + urlPath + " HTTP/1.1\r\n";
+  hdr += String("Host: ") + host + "\r\n";
+  hdr += String(authHeader) + ": " + authValue + "\r\n";
+  hdr += String("Content-Type: multipart/form-data; boundary=") + boundary + "\r\n";
+  hdr += String("Content-Length: ") + total + "\r\n";
+  hdr += "Accept: application/json\r\n";
+  hdr += "Connection: close\r\n\r\n";
+
+  // Track header and body bytes separately so the log doesn't conflate the two
+  // (a unified counter previously made it look like we sent more body than
+  // the Content-Length advertised — confusing when diagnosing).
+  size_t hdrBytes = 0;
+  size_t bodyBytes = 0;
+  if (!writeAll(wc, (const uint8_t*)hdr.c_str(), hdr.length(), hdrBytes)) {
+    Serial.println("[UPLOAD] header write failed"); wc.stop(); return -1;
+  }
+  if (!writeAll(wc, (const uint8_t*)pre.c_str(), pre.length(), bodyBytes)) {
+    Serial.println("[UPLOAD] pre-boundary write failed"); wc.stop(); return -1;
+  }
+
+  // Stream file body from SD in 512-byte chunks
+  File sf = SD.open(filePath.c_str());
+  if (!sf) { wc.stop(); Serial.println("[UPLOAD] re-open failed"); return -1; }
+  uint8_t buf[512];
+  size_t  n;
+  uint32_t bodyStart = millis();
+  bool bodyOk = true;
+  while ((n = sf.read(buf, sizeof(buf))) > 0) {
+    if (!writeAll(wc, buf, n, bodyBytes)) { bodyOk = false; break; }
+  }
+  sf.close();
+  if (!bodyOk) {
+    Serial.printf("[UPLOAD] body write stalled after %u/%d B in %lu ms\n",
+                  (unsigned)bodyBytes, total, (unsigned long)(millis() - bodyStart));
+    wc.stop(); return -1;
+  }
+
+  if (!writeAll(wc, (const uint8_t*)post.c_str(), post.length(), bodyBytes)) {
+    Serial.println("[UPLOAD] post-boundary write failed"); wc.stop(); return -1;
+  }
+
+  Serial.printf("[UPLOAD] sent header=%u B body=%u/%d B in %lu ms — waiting for response...\n",
+                (unsigned)hdrBytes, (unsigned)bodyBytes, total,
+                (unsigned long)(millis() - bodyStart));
+
+  // Read HTTP status line — e.g. "HTTP/1.1 200 OK"
+  // Track *why* we exit the wait loop (status received / connection dropped /
+  // timed out) so we can tell server-RST from a slow-response timeout.
+  uint32_t respStart    = millis();
+  uint32_t respDeadline = respStart + 30000UL;
+  String   statusLine;
+  enum { EXIT_GOT_LINE, EXIT_DISCONNECT, EXIT_TIMEOUT } exitReason = EXIT_TIMEOUT;
+  while (millis() < respDeadline) {
+    if (wc.available()) {
+      statusLine = wc.readStringUntil('\n');
+      exitReason = EXIT_GOT_LINE;
+      break;
+    }
+    if (!wc.connected()) {
+      exitReason = EXIT_DISCONNECT;
+      break;
+    }
+    delay(10);
+  }
+  statusLine.trim();
+  unsigned long respMs = millis() - respStart;
+
+  int code = 0;
+  if (statusLine.startsWith("HTTP/")) {
+    int sp = statusLine.indexOf(' ');
+    if (sp > 0) code = statusLine.substring(sp + 1, sp + 4).toInt();
+  } else {
+    const char* why = (exitReason == EXIT_DISCONNECT) ? "server closed connection"
+                    : (exitReason == EXIT_TIMEOUT)    ? "30 s timeout — no response"
+                    :                                   "got data but not HTTP/";
+    Serial.printf("[UPLOAD] no HTTP status line — %s (waited %lu ms, got: '%s')\n",
+                  why, respMs, statusLine.c_str());
+  }
+
+  // On non-2xx, skip HTTP headers then print the JSON error body.
+  // The previous version read raw bytes from the status line onward — it showed
+  // headers (Date, Content-Type, ...) and ran out of chars before reaching the
+  // JSON. Now we drain header lines until the blank line, then read the body.
+  if (code != 200 && code != 201) {
+    uint32_t drainDeadline = millis() + 4000;
+    // Skip header lines until blank line (end of headers)
+    while (millis() < drainDeadline && wc.connected()) {
+      String hline = wc.readStringUntil('\n');
+      hline.trim();
+      if (hline.isEmpty()) break;
+    }
+    // Read JSON body — handles plain and chunked bodies transparently:
+    // chunked bodies start with a hex size line which we just print as-is;
+    // the JSON that follows is still readable and that's all we need.
+    String errBody;
+    errBody.reserve(256);
+    drainDeadline = millis() + 2000;
+    while (millis() < drainDeadline && wc.connected() && errBody.length() < 512) {
+      while (wc.available() && errBody.length() < 512) errBody += (char)wc.read();
+      delay(5);
+    }
+    if (errBody.length()) Serial.printf("[UPLOAD] error body: %s\n", errBody.c_str());
+  }
+
+  wc.stop();
+  return code;
+}
+
+static bool uploadFileToWigle(const String& path, const String& fileName) {
+  if (!cfg.wigleBasicToken[0]) return false;
+  Serial.printf("[WIGLE] Uploading %s...\n", fileName.c_str());
+  String auth = String("Basic ") + cfg.wigleBasicToken;
+  int code = streamMultipartPost("api.wigle.net", "/api/v2/file/upload",
+                                  "Authorization", auth.c_str(), path, fileName);
   Serial.printf("[WIGLE] %s  HTTP %d\n", fileName.c_str(), code);
   return (code == 200);
 }
 
-// WDGWars upload — verify the endpoint and header name from your wdgwars.pl profile
-// before your first real wardrive. Stubbed here with best-guess values.
+// WDGWars upload — POST multipart/form-data to /api/upload-csv, WigleWifi-1.6 CSV format.
+// Header: X-API-Key (64-char hex). Field: "file". Confirmed from wdgwars.pl/help/#api-docs.
 static bool uploadFileToWdgwars(const String& path, const String& fileName) {
   if (!cfg.wdgwarsApiKey[0]) return false;
-  File f = SD.open(path.c_str());
-  if (!f) return false;
-  int sz = (int)f.size();
-  if (sz <= 0) { f.close(); return false; }
-  uint8_t* fileBuf = (uint8_t*)malloc(sz);
-  if (!fileBuf) { f.close(); Serial.println("[WDG] OOM"); return false; }
-  f.read(fileBuf, sz); f.close();
-
-  const char* boundary = "WASPupload0123456789";
-  String pre  = String("--") + boundary + "\r\n"
-                "Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n"
-                "Content-Type: text/csv\r\n\r\n";
-  String post = String("\r\n--") + boundary + "--\r\n";
-  int total   = pre.length() + sz + post.length();
-
-  uint8_t* body = (uint8_t*)malloc(total);
-  if (!body) { free(fileBuf); return false; }
-  int off = 0;
-  memcpy(body + off, pre.c_str(),  pre.length());  off += pre.length();
-  memcpy(body + off, fileBuf, sz);                  off += sz;
-  memcpy(body + off, post.c_str(), post.length());
-  free(fileBuf);
-
-  WiFiClientSecure wc; wc.setInsecure();
-  HTTPClient http;
-  http.begin(wc, "https://wdgwars.pl/api/v1/upload");  // TODO: confirm from wdgwars.pl profile
-  http.addHeader("X-Api-Key",    cfg.wdgwarsApiKey);   // TODO: confirm header name
-  http.addHeader("Content-Type", String("multipart/form-data; boundary=") + boundary);
-  http.addHeader("Accept",       "application/json");
-  http.setTimeout(20000);
-  int code = http.POST(body, total);
-  http.end(); free(body);
+  Serial.printf("[WDG] Uploading %s...\n", fileName.c_str());
+  int code = streamMultipartPost("wdgwars.pl", "/api/upload-csv",
+                                  "X-API-Key", cfg.wdgwarsApiKey, path, fileName);
   Serial.printf("[WDG] %s  HTTP %d\n", fileName.c_str(), code);
   return (code == 200);
 }
 
-// Connects to home WiFi, walks /logs/MACADDR/*.csv, uploads to WiGLE + WDGWars,
-// renames each file to .done on success, then restores AP + ESP-NOW.
+// Merges all pending /logs/MACADDR/*.csv into a single WigleWifi-1.6 file at outPath.
+// First file's two header lines are written once; subsequent files skip them.
+// Built on SD before WiFi starts to avoid SD/WiFi DMA coexistence issues.
+// Returns the number of source files merged (0 = nothing to do or SD error).
+static int buildMergedCsv(const String& outPath) {
+  if (SD.exists(outPath.c_str())) SD.remove(outPath.c_str());
+  File out = SD.open(outPath.c_str(), FILE_WRITE);
+  if (!out) return 0;
+
+  bool headerWritten = false;
+  int  count = 0;
+  uint8_t buf[512];
+
+  File root = SD.open("/logs");
+  if (!root) { out.close(); return 0; }
+  while (true) {
+    File macDir = root.openNextFile();
+    if (!macDir) break;
+    if (!macDir.isDirectory()) { macDir.close(); continue; }
+    String macName = "/logs/" + String(macDir.name());
+    macDir.close();
+    File sub = SD.open(macName.c_str());
+    if (!sub) continue;
+    while (true) {
+      File cf = sub.openNextFile();
+      if (!cf) break;
+      String name = String(cf.name());
+      bool isCsv = name.endsWith(".csv") && !cf.isDirectory() && cf.size() > 0;
+      cf.close();
+      if (!isCsv) continue;
+      File src = SD.open((macName + "/" + name).c_str());
+      if (!src) continue;
+      if (!headerWritten) {
+        size_t n;
+        while ((n = src.read(buf, sizeof(buf))) > 0) out.write(buf, n);
+        headerWritten = true;
+      } else {
+        src.readStringUntil('\n');  // skip WigleWifi-1.6 app line
+        src.readStringUntil('\n');  // skip MAC,SSID,... column header
+        size_t n;
+        while ((n = src.read(buf, sizeof(buf))) > 0) out.write(buf, n);
+      }
+      src.close();
+      count++;
+    }
+    sub.close();
+  }
+  root.close();
+  out.close();
+  return count;
+}
+
+// Renames every /logs/MACADDR/*.csv to .done after a successful upload batch.
+static void markAllCsvsDone() {
+  File root = SD.open("/logs");
+  if (!root) return;
+  while (true) {
+    File macDir = root.openNextFile();
+    if (!macDir) break;
+    if (!macDir.isDirectory()) { macDir.close(); continue; }
+    String macName = "/logs/" + String(macDir.name());
+    macDir.close();
+    File sub = SD.open(macName.c_str());
+    if (!sub) continue;
+    while (true) {
+      File cf = sub.openNextFile();
+      if (!cf) break;
+      String name = String(cf.name());
+      bool isCsv = name.endsWith(".csv") && !cf.isDirectory();
+      cf.close();
+      if (!isCsv) continue;
+      String fp = macName + "/" + name;
+      SD.rename(fp.c_str(), (fp + ".done").c_str());
+    }
+    sub.close();
+  }
+  root.close();
+}
+
+// Connects to home WiFi, merges all pending CSVs into one WigleWifi-1.6 file,
+// uploads it once to WiGLE and WDGWars, marks sources done, restores AP + ESP-NOW.
 static void runHomeUploads() {
   if (uploadRunning || !sdOk) return;
   if (!cfg.homeSsid[0]) return;
@@ -457,9 +657,23 @@ static void runHomeUploads() {
   if (!hasFilesToUpload()) { Serial.println("[HOME] No files to upload"); return; }
 
   uploadRunning = true;
-  Serial.printf("\n[HOME] Connecting to %s ...", cfg.homeSsid);
-  nestLedFlashEvent(evNestUploadAct);  // solid cyan — uploading
+  nestLedFlashEvent(evNestUploadAct);
 
+  // Build merged CSV on SD before bringing up WiFi (avoids SD/WiFi DMA conflict)
+  const String mergePath = "/merge_tmp.csv";
+  int mergedCount = buildMergedCsv(mergePath);
+  if (mergedCount == 0) {
+    Serial.println("[HOME] Merge produced no files — aborting");
+    nestLedOff(); nestLedFlashEvent(evNestUploadFail);
+    uploadRunning = false;
+    return;
+  }
+  { File mf = SD.open(mergePath.c_str());
+    Serial.printf("[HOME] Merged %d file(s) → %s (%d B)\n",
+                  mergedCount, mergePath.c_str(), mf ? (int)mf.size() : 0);
+    if (mf) mf.close(); }
+
+  Serial.printf("[HOME] Connecting to %s ...", cfg.homeSsid);
   esp_now_deinit();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
@@ -474,6 +688,7 @@ static void runHomeUploads() {
     Serial.println("[HOME] Connect failed — restoring AP");
     nestLedOff(); nestLedFlashEvent(evNestUploadFail);
     homeStatus = 2;
+    SD.remove(mergePath.c_str());
     WiFi.disconnect(true); delay(200);
     restoreNestAP();
     uploadRunning = false;
@@ -481,58 +696,30 @@ static void runHomeUploads() {
   }
   Serial.printf("[HOME] Connected  IP: %s\n", WiFi.localIP().toString().c_str());
 
-  int wigleOk = 0, wigleFail = 0, wdgOk = 0, wdgFail = 0;
+  bool wOk = cfg.wigleBasicToken[0] ? uploadFileToWigle(mergePath,   "WASP_merged.csv") : true;
+  bool dOk = cfg.wdgwarsApiKey[0]   ? uploadFileToWdgwars(mergePath, "WASP_merged.csv") : true;
 
-  // Walk /logs/MACADDR/*.csv
-  File root = SD.open("/logs");
-  if (root) {
-    while (true) {
-      File macDir = root.openNextFile();
-      if (!macDir) break;
-      if (!macDir.isDirectory()) { macDir.close(); continue; }
-      String macName = "/logs/" + String(macDir.name());
-      macDir.close();
-
-      File sub = SD.open(macName.c_str());
-      if (!sub) continue;
-      while (true) {
-        File cf = sub.openNextFile();
-        if (!cf) break;
-        String name = String(cf.name());
-        int    csz  = (int)cf.size();
-        bool   isCsv = name.endsWith(".csv") && !cf.isDirectory() && csz > 0;
-        cf.close();
-        if (!isCsv) continue;
-
-        String fullPath = macName + "/" + name;
-        bool wOk = cfg.wigleBasicToken[0]  ? uploadFileToWigle(fullPath, name)   : true;
-        bool dOk = cfg.wdgwarsApiKey[0]    ? uploadFileToWdgwars(fullPath, name) : true;
-
-        if (cfg.wigleBasicToken[0])  wOk ? wigleOk++ : wigleFail++;
-        if (cfg.wdgwarsApiKey[0])    dOk ? wdgOk++   : wdgFail++;
-
-        if (wOk && dOk) SD.rename(fullPath.c_str(), (fullPath + ".done").c_str());
-      }
-      sub.close();
-    }
-    root.close();
-  }
+  SD.remove(mergePath.c_str());
 
   taskENTER_CRITICAL(&gLock);
   if (cfg.wigleBasicToken[0])
-    snprintf(lastWigleStr, sizeof(lastWigleStr), "%d OK %d fail", wigleOk, wigleFail);
+    snprintf(lastWigleStr, sizeof(lastWigleStr), wOk ? "%d files OK" : "FAIL", mergedCount);
   if (cfg.wdgwarsApiKey[0])
-    snprintf(lastWdgStr,   sizeof(lastWdgStr),   "%d OK %d fail", wdgOk,   wdgFail);
+    snprintf(lastWdgStr,   sizeof(lastWdgStr),   dOk ? "%d files OK" : "FAIL", mergedCount);
   taskEXIT_CRITICAL(&gLock);
 
-  Serial.printf("[HOME] Done — WiGLE %d/%d  WDGWars %d/%d\n",
-                wigleOk, wigleOk + wigleFail, wdgOk, wdgOk + wdgFail);
+  Serial.printf("[HOME] Done — WiGLE %s  WDGWars %s\n",
+                wOk ? "OK" : "FAIL", dOk ? "OK" : "FAIL");
 
-  bool anyFail = (wigleFail + wdgFail) > 0;
-  bool anyOk   = (wigleOk   + wdgOk)   > 0;
   nestLedOff();
-  if  (anyOk && !anyFail) { nestLedFlashEvent(evNestUploadOK);   homeStatus = 1; }
-  else                    { nestLedFlashEvent(evNestUploadFail);  homeStatus = 2; }
+  if (wOk && dOk) {
+    markAllCsvsDone();
+    nestLedFlashEvent(evNestUploadOK);
+    homeStatus = 1;
+  } else {
+    nestLedFlashEvent(evNestUploadFail);
+    homeStatus = 2;
+  }
 
   WiFi.disconnect(true); delay(200);
   restoreNestAP();
@@ -738,7 +925,9 @@ static void handleRawUpload() {
 
   client.println("READY");  // tell worker we're open and ready for data
 
-  uint8_t  buf[4096];
+  // Static so the 4 KB doesn't sit on uploadTask's stack — only one client
+  // is served at a time inside this single-threaded handler.
+  static uint8_t buf[4096];
   int      remaining = fileSize;
   size_t   written   = 0;
   uint32_t deadline  = millis() + 30000;
@@ -1025,13 +1214,17 @@ void setup() {
   delay(500);
 
   Serial.println("\n========================================");
-  Serial.println(" W.A.S.P. Nest — Stage 12");
+  Serial.println(" W.A.S.P. Nest — Stage 14");
   Serial.println(" ESP-NOW + WiFi AP + Chunked Upload + Home Upload");
   Serial.println("========================================");
+  Serial.printf("[BOOT] heap=%u  stack=%u\n",
+                ESP.getFreeHeap(), uxTaskGetStackHighWaterMark(NULL));
 
+  Serial.println("[BOOT] 1/9 backlight");
   pinMode(TFT_BACKLIGHT, OUTPUT);
   digitalWrite(TFT_BACKLIGHT, HIGH);
 
+  Serial.println("[BOOT] 2/9 tft.init()");
   tft.init();
   // GPIO 4 (NEST_LED_R) is now free — TFT_RST pulse completed inside tft.init()
   pinMode(NEST_LED_R, OUTPUT);
@@ -1045,6 +1238,7 @@ void setup() {
   drawHeader();
 
   // SD — must come before loadConfig()
+  Serial.println("[BOOT] 3/9 SD init");
   sdSpi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   drawBootMsg("SD...");
   if (SD.begin(SD_CS, sdSpi)) {
@@ -1056,6 +1250,7 @@ void setup() {
   }
 
   // Config — read from SD before any network setup
+  Serial.println("[BOOT] 4/9 loadConfig()");
   drawBootMsg("Reading config...");
   loadConfig();
   if (cfg.homeSsid[0]) {
@@ -1068,6 +1263,7 @@ void setup() {
   }
 
   // WiFi — AP uses credentials from config
+  Serial.println("[BOOT] 5/9 WiFi mode + softAP");
   drawBootMsg("WiFi...");
   WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_AP_STA);
@@ -1082,6 +1278,7 @@ void setup() {
                 cfg.apSsid, WiFi.softAPIP().toString().c_str(), ESPNOW_CHANNEL);
 
   // ESP-NOW
+  Serial.println("[BOOT] 6/9 esp_now_init");
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (esp_now_init() != ESP_OK) {
     Serial.println(" ERROR: esp_now_init() failed");
@@ -1091,6 +1288,7 @@ void setup() {
   }
 
   // HTTP servers
+  Serial.println("[BOOT] 7/9 HTTP servers");
   server.on("/upload", HTTP_POST, handleUpload);
   server.begin();
   rawServer.begin();
@@ -1098,8 +1296,13 @@ void setup() {
   Serial.println(" Raw upload server started (port 8080)");
   Serial.println(" Ready — waiting for workers\n");
 
-  xTaskCreatePinnedToCore(uploadTask, "upload", 8192, NULL, 5, NULL, 0);
+  Serial.println("[BOOT] 8/9 uploadTask spawn");
+  // Stack bumped to 12 KB — handleRawUpload uses a 4 KB static buf, but TLS
+  // handshakes inside streamMultipartPost transiently push deep stack frames.
+  xTaskCreatePinnedToCore(uploadTask, "upload", 12288, NULL, 5, NULL, 0);
 
+  Serial.println("[BOOT] 9/9 setup() complete");
+  Serial.printf("[BOOT] heap=%u\n", ESP.getFreeHeap());
   tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
   refreshDisplay();
 }
