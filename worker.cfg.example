@@ -7,3 +7,19 @@ ledEnabled=true          # true/false or 1/0 — disables all LED output when fa
 ledBrightness=40         # 0–255 — 40 is comfortably visible without being blinding
 ledType=ws2812           # ws2812  → addressable WS2812B/SK6812 on D0 (GPIO3) via RMT
                          # rgb4pin → common-cathode 4-pin RGB: R=D0, G=D4, B=D5
+
+# LED event colours and timing — format: RRGGBB,flashes,onMs,offMs
+# Omit any line to keep the compiled-in default.
+# flashes=0 on ledGPSAcquire and ledConnecting means continuous toggle (those are loop-based).
+#ledBoot=FFFFFF,3,50,50
+#ledGPSAcquire=FAA307,0,400,400
+#ledGPSFound=FAA307,4,400,300
+#ledGPSFix=00FFFF,2,150,100
+#ledScanCycle=FFFF00,1,100,0
+#ledConnecting=4488FF,0,200,200
+#ledSyncOK=00FF00,2,150,100
+#ledSyncFail=FF0000,3,80,80
+#ledTooBig=FF6600,4,80,80
+#ledLowHeap=FF0000,1,400,0
+#ledDronePulse=00FFFF,2,200,100
+#ledHeartbeat=FF69B4,2,80,80
