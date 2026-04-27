@@ -427,7 +427,7 @@ static bool openLogFile() {
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) { Serial.printf("[SD] Failed to open %s\n", logPath.c_str()); return false; }
   logFile.println("WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Worker,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0");
-  logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type");
+  logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type,RCOIs,MfgrId");
   logFile.flush();
   Serial.printf("[SD] Log: %s\n", logPath.c_str());
   return true;
@@ -461,7 +461,7 @@ static void logWiFiRow(const String& mac, const String& ssid, wifi_auth_mode_t a
   if (ts.isEmpty()) ts = "1970-01-01 00:00:00";
   String safe = ssid; safe.replace("\"", "\"\"");
   char line[256];
-  snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,%.6f,%.6f,%.0f,%.1f,,,WIFI",
+  snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,%.6f,%.6f,%.0f,%.1f,WIFI,,",
            mac.c_str(), safe.c_str(), wigleAuth(auth),
            ts.c_str(), channel, channelToFreq(channel), rssi, lat, lon, altM, accuracy);
   logFile.println(line);
@@ -477,7 +477,7 @@ static void logBLERow(const String& mac, const String& name, int rssi,
   char mfgrField[8] = "";
   if (hasMfgr) snprintf(mfgrField, sizeof(mfgrField), "%u", mfgrId);
   char line[256];
-  snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,%.6f,%.6f,%.0f,%.1f,,%s,BLE",
+  snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,%.6f,%.6f,%.0f,%.1f,BLE,,%s",
            mac.c_str(), safe.c_str(), ts.c_str(), rssi, lat, lon, altM, accuracy, mfgrField);
   logFile.println(line);
   maybeFlush();
@@ -524,7 +524,7 @@ static String buildCSV(int idx) {
   String csv;
   csv.reserve(2048);
   csv += "WigleWifi-1.6,appRelease=1,model=WASP-WarDriver_v1,release=1,device=WASP-Drone,display=,board=XIAO-ESP32C5,brand=Seeed,star=Sol,body=3,subBody=0\n";
-  csv += "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n";
+  csv += "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type,RCOIs,MfgrId\n";
 
   for (int i = 0; i < s.wifiCount; i++) {
     const wifi_entry_t& w = s.wifi[i];
@@ -534,7 +534,7 @@ static String buildCSV(int idx) {
     String ssid = String(w.ssid);
     ssid.replace("\"", "\"\"");
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,0.000000,0.000000,0,999.9,,,WIFI",
+    snprintf(line, sizeof(line), "%s,\"%s\",%s,%s,%d,%d,%d,0.000000,0.000000,0,999.9,WIFI,,",
              bssid, ssid.c_str(), wigleAuth((wifi_auth_mode_t)w.auth),
              nowTimestamp().c_str(), w.channel, channelToFreq(w.channel), w.rssi);
     csv += line; csv += '\n';
@@ -550,7 +550,7 @@ static String buildCSV(int idx) {
     char mfgrField[8] = "";
     if (b.hasMfgr) snprintf(mfgrField, sizeof(mfgrField), "%u", b.mfgrId);
     char line[200];
-    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,0.000000,0.000000,0,999.9,,%s,BLE",
+    snprintf(line, sizeof(line), "%s,\"%s\",[BLE],%s,0,,%d,0.000000,0.000000,0,999.9,BLE,,%s",
              addr, name.c_str(), nowTimestamp().c_str(), b.rssi, mfgrField);
     csv += line; csv += '\n';
   }
