@@ -109,12 +109,17 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 | SD SCK | SD header | D8 | GPIO8 |
 | SD MISO | SD header | D9 | GPIO9 |
 | SD MOSI | SD header | D10 | GPIO10 |
-| RGB LED data | D0 breakout | D0 | GPIO3 |
+| RGB LED data / R | D0 breakout | D0 | GPIO3 |
+| RGB LED G | D4 breakout | D4 | GPIO23 |
+| RGB LED B | D5 breakout | D5 | GPIO24 |
 
-> **Note on the RGB LED:** Use an SK6812 mini-e or similar 3.3V-tolerant device directly on the D0 data line; WS2812B works too but prefers 5V logic — at short cable runs the C5's 3.3V output usually drives it reliably. Pull the LED's power from the 3V3 pin for battery efficiency.
+> **Note on the RGB LED:** Two types are supported, chosen via `ledType` in `worker.cfg`:
+> - **`ws2812`** (default) — addressable WS2812B or SK6812 on D0 (GPIO3). SK6812 mini-e is recommended (3.3V tolerant). WS2812B works but prefers 5V logic — at short cable runs the C5's 3.3V output usually drives it.
+> - **`rgb4pin`** — standard 4-pin common-cathode RGB LED. R=D0 (GPIO3), G=D4 (GPIO23), B=D5 (GPIO24). Pull each channel through a ~47–100Ω resistor to the GPIO pin; cathode to GND. D4 and D5 were freed in Stage 11 when the OLED was removed.
+> Pull the LED's power from the 3V3 pin for battery efficiency.
 
 **Peripherals per worker:**
-- Single addressable RGB LED (WS2812/SK6812) — status flashes (GPS state, scan active, sync result). Brightness and on/off controlled via `wasp.cfg` (`ledBrightness`, `ledEnabled`). Replaces SSD1306 OLED — the Nest display handles all rich status; an OLED on a field unit nobody can read wastes power.
+- RGB LED — status flashes (GPS state, scan active, sync result). Type (`ws2812` or `rgb4pin`), brightness, and on/off controlled per-worker via `worker.cfg`. Replaces SSD1306 OLED — the Nest display handles all rich status; an OLED on a field unit nobody can read wastes power.
 - UART GPS module — independent geo-tagging
 - SPI micro-SD module — local log storage when out of nest range
 
@@ -128,7 +133,7 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 
 ## LED Status Flash Codes
 
-### Worker (WS2812/SK6812 on D0 / GPIO 3)
+### Worker (D0/GPIO3 for WS2812B; D0+D4+D5 for 4-pin common-cathode)
 
 | State | Colour | Pattern |
 |---|---|---|
@@ -142,7 +147,7 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 | Chunked upload failed (file → .defer) | Orange `#FF6600` | 4× fast flash |
 | Low heap warning | Red `#FF0000` | 1× slow pulse (400 ms) |
 
-Brightness and on/off are set per-worker in `/worker.cfg` on the worker SD card (`ledBrightness=40`, `ledEnabled=true`). See `worker.cfg.example`.
+LED type, brightness, and on/off are set per-worker in `/worker.cfg` on the worker SD card. See `worker.cfg.example`.
 
 ### Nest (onboard RGB LED — active LOW, GPIOs 4 / 16 / 17)
 
@@ -171,6 +176,7 @@ Brightness and on/off are set per-worker in `/worker.cfg` on the worker SD card 
 | 9 | Hardened file sync — 8 KB log cap, RAM pre-buffer, path validation, TCP upload | ✅ Complete |
 | 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | ✅ Complete |
 | 11 | RGB LED status — replace OLED with single addressable LED; brightness + on/off in worker.cfg | ✅ Complete |
+| 12 | Home upload — Nest connects to home WiFi and uploads CSVs to WiGLE + WDGWars; worker `ledType` config (ws2812 / rgb4pin) | ✅ Complete |
 
 ---
 
@@ -219,7 +225,8 @@ Both devices use a simple `key=value` config file on their own SD card. Lines st
 | Key | Default | Description |
 |---|---|---|
 | `ledEnabled` | `true` | `false` or `0` to disable all LED output |
-| `ledBrightness` | `40` | NeoPixel brightness 0–255 (40 ≈ 15%, visible but not blinding) |
+| `ledBrightness` | `40` | 0–255 brightness (40 ≈ 15%, visible but not blinding) |
+| `ledType` | `ws2812` | `ws2812` = addressable WS2812B/SK6812 on D0; `rgb4pin` = common-cathode 4-pin RGB (R=D0, G=D4, B=D5) |
 
 Config is read once at boot. If the file is absent, compiled-in defaults apply.
 Each worker can carry its own `worker.cfg` so units can be tuned independently without reflashing.
@@ -340,9 +347,9 @@ packet — useful for understanding worker range.
 
 ```
 /
-├── stage11_rgb_led/               ← active firmware (flash this)
+├── stage12_home_upload/           ← active firmware (flash this)
 │   ├── nest/
-│   │   ├── nest.ino               ← CYD: display + AP + chunked TCP upload server + RGB LED
+│   │   ├── nest.ino               ← CYD: display + AP + chunked upload + WiGLE/WDGWars
 │   │   └── nest_types.h
 │   └── worker/worker.ino          ← C5: unified Worker/Drone + RGB LED status
 │
