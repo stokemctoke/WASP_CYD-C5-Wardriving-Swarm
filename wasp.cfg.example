@@ -1,6 +1,10 @@
 # W.A.S.P. Nest configuration
 # Place on Nest SD card as /wasp.cfg
 # Lines starting with # are comments. No spaces around = signs.
+#
+# FACTORY RESET: place a file called /reset.cfg on the SD card (any content or empty).
+# The nest will ignore wasp.cfg entirely and boot on compiled-in defaults.
+# Remove /reset.cfg once you are ready to use your config again.
 
 # Home Wi-Fi — Nest connects here to upload to WiGLE and WDGWars
 homeSsid=YourHomeWiFiName

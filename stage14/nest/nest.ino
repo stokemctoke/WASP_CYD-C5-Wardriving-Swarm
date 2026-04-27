@@ -166,6 +166,12 @@ static bool loadConfig() {
   strlcpy(cfg.apSsid, "WASP-Nest", sizeof(cfg.apSsid));
   strlcpy(cfg.apPsk,  "waspswarm", sizeof(cfg.apPsk));
 
+  // If /reset.cfg exists, skip wasp.cfg entirely and boot on compiled defaults.
+  if (SD.exists("/reset.cfg")) {
+    Serial.println("[CFG] /reset.cfg found — using compiled defaults, wasp.cfg ignored");
+    return false;
+  }
+
   File f = SD.open("/wasp.cfg");
   if (!f) {
     Serial.println("[CFG] /wasp.cfg not found — using defaults");
