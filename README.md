@@ -171,6 +171,7 @@ Brightness and on/off are set per-worker in `/worker.cfg` on the worker SD card 
 | 9 | Hardened file sync — 8 KB log cap, RAM pre-buffer, path validation, TCP upload | ✅ Complete |
 | 10 | Chunked upload — split large files into 8 KB chunks for reliable transfer of any size | ✅ Complete |
 | 11 | RGB LED status — replace OLED with single addressable LED; brightness + on/off in worker.cfg | ✅ Complete |
+| 12 | Home upload — Nest connects to home WiFi and uploads CSVs to WiGLE + WDGWars | Planned |
 
 ---
 
@@ -340,9 +341,9 @@ packet — useful for understanding worker range.
 
 ```
 /
-├── stage11_rgb_led/               ← active firmware (flash this)
+├── stage12_home_upload/           ← active firmware (flash this)
 │   ├── nest/
-│   │   ├── nest.ino               ← CYD: display + AP + chunked TCP upload server + RGB LED
+│   │   ├── nest.ino               ← CYD: display + AP + chunked upload + WiGLE/WDGWars
 │   │   └── nest_types.h
 │   └── worker/worker.ino          ← C5: unified Worker/Drone + RGB LED status
 │
