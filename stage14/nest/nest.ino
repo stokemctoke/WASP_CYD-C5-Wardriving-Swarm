@@ -172,6 +172,14 @@ struct wasp_config_t {
 
 static wasp_config_t cfg = {};   // zero-init; defaults applied in loadConfig()
 
+// ── Nest LED event defaults (overridden by wasp.cfg at boot) ─────────────────
+static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 }; // white   — startup / config loaded
+static LedEvent evNestHeartbeat  = { 0xFF69B4, 2,  80,  80 }; // pink    — heartbeat / idle
+static LedEvent evNestChunk      = { 0x0050FF, 1,  80,   0 }; // blue    — receiving chunk from worker
+static LedEvent evNestUploadAct  = { 0xFF00B4, 0,   0,   0 }; // magenta — solid while uploading
+static LedEvent evNestUploadOK   = { 0x64FF00, 2, 200, 200 }; // lime    — upload success
+static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 }; // red     — upload failed
+
 static bool loadConfig() {
   // Defaults — overridden by wasp.cfg if present
   strlcpy(cfg.apSsid, "WASP-Nest", sizeof(cfg.apSsid));
@@ -276,13 +284,6 @@ static void nestLedFlash(bool r, bool g, bool b, int times, int onMs, int offMs)
     if (i < times - 1) delay(offMs);
   }
 }
-
-static LedEvent evNestBoot       = { 0xFFFFFF, 3,  50,  50 }; // white   — startup / config loaded
-static LedEvent evNestHeartbeat  = { 0xFF69B4, 2,  80,  80 }; // pink    — heartbeat / idle
-static LedEvent evNestChunk      = { 0x0050FF, 1,  80,   0 }; // blue    — receiving chunk from worker
-static LedEvent evNestUploadAct  = { 0xFF00B4, 0,   0,   0 }; // magenta — solid while uploading
-static LedEvent evNestUploadOK   = { 0x64FF00, 2, 200, 200 }; // lime    — upload success
-static LedEvent evNestUploadFail = { 0xFF0000, 3, 200, 200 }; // red     — upload failed
 
 static void nestLedFlashEvent(const LedEvent& ev) {
   bool r = ((ev.colour >> 16) & 0xFF) > 0;
