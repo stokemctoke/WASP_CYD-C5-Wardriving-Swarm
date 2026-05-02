@@ -21,9 +21,11 @@
  *   #define SPI_READ_FREQUENCY  20000000
  *
  * ── CYD wiring ───────────────────────────────────────────────────────────────
- *   Display backlight : GPIO21  (driven HIGH)
+ *   Display backlight : GPIO21  (PWM via LEDC channel 0)
  *   Display SPI       : HSPI — configured in User_Setup.h above
  *   SD card SPI       : VSPI — CS=5  SCK=18  MISO=19  MOSI=23
+ *   Touch SPI         : HSPI shared (CLK=25 MISO=39 MOSI=32 CS=33 IRQ=36)
+ *                       If touch is unresponsive swap to CLK=14/MISO=12/MOSI=13
  *
  * ── wasp.cfg keys ────────────────────────────────────────────────────────────
  *   homeSsid / homePsk         Home WiFi credentials
@@ -52,6 +54,8 @@
 #include "nest_upload.h"
 #include "nest_home.h"
 #include "nest_display.h"
+#include "nest_touch.h"
+#include "nest_ui.h"
 
 bool     sdOk = false;
 SPIClass sdSpi(VSPI);
@@ -91,8 +95,9 @@ void setup() {
   Serial.printf("[BOOT] heap=%u\n", ESP.getFreeHeap());
 
   Serial.println("[BOOT] 1/9 backlight");
-  pinMode(TFT_BACKLIGHT, OUTPUT);
-  digitalWrite(TFT_BACKLIGHT, HIGH);
+  ledcSetup(BACKLIGHT_CH, 5000, 8);
+  ledcAttachPin(TFT_BACKLIGHT, BACKLIGHT_CH);
+  ledcWrite(BACKLIGHT_CH, 255);
 
   Serial.println("[BOOT] 2/9 tft.init()");
   tft.init();
@@ -163,7 +168,11 @@ void setup() {
   Serial.println("[BOOT] 8/9 uploadTask spawn");
   xTaskCreatePinnedToCore(uploadTask, "upload", 12288, NULL, 5, NULL, 0);
 
-  Serial.println("[BOOT] 9/9 setup() complete");
+  Serial.println("[BOOT] 9/9 touch init");
+  touchBegin();
+  Serial.println(" Touch ready");
+
+  Serial.println("[BOOT] 10/10 setup() complete");
   Serial.printf("[BOOT] heap=%u\n", ESP.getFreeHeap());
   tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
   refreshDisplay();
@@ -174,6 +183,8 @@ void loop() {
   static uint32_t lastClean   = 0;
   uint32_t now = millis();
 
+  handleTouch();
+
   if (ledHeartbeatFlag) { ledHeartbeatFlag = false; nestLedFlashEvent(evNestHeartbeat); }
 
   if (now - lastUploadAttemptMs >= HOME_UPLOAD_INTERVAL_MS) {
@@ -182,5 +193,5 @@ void loop() {
   }
 
   if (now - lastRefresh >= 1000) { refreshDisplay(); lastRefresh = now; }
-  if (now - lastClean   >= 30000) { cleanRegistry();  lastClean   = now; }
+  if (now - lastClean >= 30000) { cleanRegistry(); lastClean = now; }
 }

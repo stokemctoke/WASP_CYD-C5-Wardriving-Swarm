@@ -52,6 +52,35 @@
 #define WASP_PKT_HEARTBEAT 0x02
 #define WASP_FIRMWARE_VER  10
 
+// ── Backlight PWM ─────────────────────────────────────────────────────────────
+#define BACKLIGHT_CH    0       // LEDC channel
+
+// ── Touch (XPT2046) ───────────────────────────────────────────────────────────
+// If touch feels unresponsive, try TOUCH_CLK=14, TOUCH_MISO=12, TOUCH_MOSI=13
+// (some CYD variants share the HSPI bus with the display instead of these pins)
+#define TOUCH_CS    33
+#define TOUCH_IRQ   36
+#define TOUCH_CLK   25
+#define TOUCH_MISO  39
+#define TOUCH_MOSI  32
+
+// ── UI layout ─────────────────────────────────────────────────────────────────
+#define BACK_BTN_W  44          // back button tap area width
+
+// ── UI colours ────────────────────────────────────────────────────────────────
+#define CLR_BTN_BG    0x2104    // dark button background
+#define CLR_BTN_ACT   0x4208    // active / pressed button
+#define CLR_HIGHLIGHT 0xFD20    // selected item
+
+// ── Screen IDs ────────────────────────────────────────────────────────────────
+enum ScreenId {
+  SCR_HOME = 0,
+  SCR_WORKER_DETAIL,
+  SCR_FILE_BROWSER,
+  SCR_FILE_LIST,
+  SCR_SETTINGS,
+};
+
 // ── LED event descriptor ──────────────────────────────────────────────────────
 // colour = 24-bit RGB; CYD LED is binary so only non-zero channels are checked.
 // flashes = 0 means solid on (used for upload-in-progress indicator).
