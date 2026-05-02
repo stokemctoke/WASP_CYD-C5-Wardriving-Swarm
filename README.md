@@ -1,3 +1,7 @@
+[![Ko-Fi](https://img.shields.io/badge/Ko--Fi-Support%20Me-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/stoke)
+[![My Website](https://img.shields.io/badge/Website-stokemctoke.com-FAA307)](https://stokemctoke.com)
+[![Platform: ESP32-C5](https://img.shields.io/badge/Platform-ESP32--C5-blue)](https://www.espressif.com/en/products/socs/esp32-c5)
+
 # W.A.S.P. — Wardriving Autonomous Swarm Platform
 
 ![W.A.S.P. — Wardriving Autonomous Swarm Platform](WASP_Repo-Image.jpg)
