@@ -165,6 +165,27 @@ void syncFiles() {
     }
   }
 
+  {
+    File dir = SD.open("/logs");
+    if (dir) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String n = String(entry.name());
+        bool d = entry.isDirectory();
+        int s = (int)entry.size();
+        entry.close();
+        if (!d && n.endsWith(".csv") && s > 0 && s < 280) {
+          String op = "/logs/" + n;
+          if (SD.remove(op.c_str())) {
+            Serial.printf("[SYNC]  Deleted %s (%d B — too small)\n", n.c_str(), s);
+          }
+        }
+      }
+      dir.close();
+    }
+  }
+
   const int MAX_QUEUE = 100;
   String queueName[MAX_QUEUE];
   int queueSize[MAX_QUEUE];

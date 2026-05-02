@@ -30,15 +30,25 @@ void cleanRegistry() {
   uint32_t now = millis();
   for (int i = 0; i < MAX_WORKERS; i++) {
     taskENTER_CRITICAL(&gLock);
-    bool expired = workers[i].lastSeenMs > 0 &&
-                   (now - workers[i].lastSeenMs) >= WORKER_REMOVE_MS;
+    bool hasSeen = workers[i].lastSeenMs > 0;
+    uint32_t age = hasSeen ? (now - workers[i].lastSeenMs) : 0;
+    bool expired = hasSeen && age >= WORKER_REMOVE_MS;
+    bool offline = hasSeen && age >= WORKER_TIMEOUT_MS && age < WORKER_REMOVE_MS && !workers[i].offlineNotified;
     uint8_t macB[6];
-    if (expired) { memcpy(macB, workers[i].mac, 6); memset(&workers[i], 0, sizeof(workers[i])); }
-    taskEXIT_CRITICAL(&gLock);
-    if (!expired) continue;
     char mac[18];
-    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             macB[0], macB[1], macB[2], macB[3], macB[4], macB[5]);
-    Serial.printf("[NEST] Worker %s expired — slot freed\n", mac);
+    if (expired) { memcpy(macB, workers[i].mac, 6); memset(&workers[i], 0, sizeof(workers[i])); }
+    if (offline) {
+      memcpy(macB, workers[i].mac, 6);
+      workers[i].offlineNotified = true;
+      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+               macB[0], macB[1], macB[2], macB[3], macB[4], macB[5]);
+    }
+    taskEXIT_CRITICAL(&gLock);
+    if (offline) Serial.printf("[NEST] Worker %s offline — no heartbeat for %u ms\n", mac, age);
+    if (expired) {
+      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+               macB[0], macB[1], macB[2], macB[3], macB[4], macB[5]);
+      Serial.printf("[NEST] Worker %s expired — slot freed\n", mac);
+    }
   }
 }

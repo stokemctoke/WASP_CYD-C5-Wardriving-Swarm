@@ -74,6 +74,7 @@ struct worker_entry_t {
   uint16_t bleCount;
   uint32_t cycleCount;
   uint8_t  nodeType;   // 0 = worker, 1 = drone
+  bool     offlineNotified;  // track if offline transition has been logged
 };
 
 // ── Config struct ─────────────────────────────────────────────────────────────
