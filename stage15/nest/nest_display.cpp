@@ -150,12 +150,11 @@ void drawHome() {
   for (int i = 0; i < MAX_WORKERS; i++)
     if (snap[i].lastSeenMs > 0 && (now - snap[i].lastSeenMs) < WORKER_TIMEOUT_MS) active++;
 
-  // Header — gear tap target is rightmost 34px of header
+  // Header — overpaint right side with FILES and SETTINGS buttons
   drawHeader();
-  tft.setTextFont(1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(CLR_HDR_FG, CLR_HDR_BG);
-  tft.drawString("*", 236, HEADER_H / 2);
+  tft.fillRect(170, 0, 70, HEADER_H, CLR_HDR_BG);
+  drawBtn(174, 4, 30, 20, "F");
+  drawBtn(206, 4, 30, 20, "S");
 
   // Status bar
   tft.fillRect(0, HEADER_H, 240, STATUS_H, CLR_BG);
@@ -499,7 +498,7 @@ void drawSettings() {
 }
 
 // ── DISPATCHER ───────────────────────────────────────────────────────────────
-void refreshDisplay() {
+void drawCurrentScreen() {
   switch (uiCurrent()) {
     case SCR_HOME:          drawHome();          break;
     case SCR_WORKER_DETAIL: drawWorkerDetail();  break;
@@ -507,6 +506,13 @@ void refreshDisplay() {
     case SCR_FILE_LIST:     drawFileList();      break;
     case SCR_SETTINGS:      drawSettings();      break;
   }
+}
+
+void refreshDisplay() {
+  // 1Hz tick: only Home auto-redraws because its worker stats are live.
+  // Detail screens are static and only repaint on navigation, which avoids
+  // the full-screen fillRect flicker.
+  if (uiCurrent() == SCR_HOME) drawHome();
 }
 
 void dispatchTap(int px, int py) {
@@ -521,8 +527,9 @@ void dispatchTap(int px, int py) {
 
 // ── TAP HANDLERS ─────────────────────────────────────────────────────────────
 void handleTapHome(int px, int py) {
-  if (py < HEADER_H && px > 190) {
-    uiTransitionTo(SCR_SETTINGS); return;
+  if (py < HEADER_H) {
+    if (px >= 170 && px < 204) { uiInvalidateBrowser(); uiTransitionTo(SCR_FILE_BROWSER); return; }
+    if (px >= 204 && px < 240) { uiTransitionTo(SCR_SETTINGS); return; }
   }
   int contentY = HEADER_H + STATUS_H;
   int footerY  = 320 - FOOTER_H;

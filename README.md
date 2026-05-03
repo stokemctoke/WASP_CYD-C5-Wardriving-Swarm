@@ -133,6 +133,8 @@ The XIAO Expansion Board v1.2 exposes the following connections used by W.A.S.P.
 
 > **Display driver:** The JC2432W328C runs an **ILI9341** panel — confirmed by working firmware. Some sources list ST7789; that applies to a different CYD variant. Configure `TFT_eSPI`'s `User_Setup.h` with `#define ILI9341_DRIVER`.
 
+> **Touch driver:** The JC2432W328C uses a **CST820 capacitive** controller on I²C (SDA=33, SCL=32, RST=25, addr=0x15) — *not* the resistive XPT2046/SPI controller used by older CYDs. The firmware drives it with a minimal `Wire`-based driver (`nest_touch.cpp`) — no extra library install. The CST820 INT pin (GPIO 21) collides with the TFT backlight on this board, so touch is polled, not interrupt-driven.
+
 ---
 
 ## LED Status Flash Codes
@@ -184,6 +186,7 @@ LED type, brightness, and all flash patterns are set per-worker in `/worker.cfg`
 | 13 | LED config via SD — all flash patterns (colour, count, timing) tuneable in wasp.cfg / worker.cfg without reflash | ✅ Complete |
 | 14 | Fast sync + upload fixes — single-connect chunked upload confirmed; WiGLE column order fix; ESP-NOW restore after failed nest connect | ✅ Complete |
 | 15 | Modular refactor — worker split into 9 modules; nest split into 8 modules. Future changes touch only the relevant file | ✅ Complete |
+| 16 | Nest touch UI — capacitive CST820 (I²C) driver, stack-based menu, fade transitions, file browser, worker detail, settings. Invalidation-driven rendering eliminates flicker on detail screens | ✅ Complete |
 
 ---
 
@@ -309,7 +312,9 @@ Each worker can carry its own `worker.cfg` so units can be tuned independently w
 │   │   ├── nest_espnow.h/cpp      ← ESP-NOW receive callback
 │   │   ├── nest_upload.h/cpp      ← TCP raw + HTTP upload handlers
 │   │   ├── nest_home.h/cpp        ← home WiFi connect + WiGLE/WDGWars upload
-│   │   └── nest_display.h/cpp     ← TFT display rendering
+│   │   ├── nest_display.h/cpp     ← TFT display rendering
+│   │   ├── nest_touch.h/cpp       ← CST820 capacitive touch driver (I²C)
+│   │   └── nest_ui.h/cpp          ← screen stack, fade transitions, touch dispatch
 │   └── worker/
 │       ├── worker.ino             ← setup(), loop(), mode detection
 │       ├── worker_types.h         ← shared structs, constants, pin defines

@@ -52,20 +52,17 @@
 #define WASP_PKT_HEARTBEAT 0x02
 #define WASP_FIRMWARE_VER  10
 
-// ── Backlight PWM ─────────────────────────────────────────────────────────────
-#define BACKLIGHT_CH    0       // LEDC channel
-
-// ── Touch (XPT2046) ───────────────────────────────────────────────────────────
-// If touch feels unresponsive, try TOUCH_CLK=14, TOUCH_MISO=12, TOUCH_MOSI=13
-// (some CYD variants share the HSPI bus with the display instead of these pins)
-#define TOUCH_CS    33
-#define TOUCH_IRQ   36
-#define TOUCH_CLK   25
-#define TOUCH_MISO  39
-#define TOUCH_MOSI  32
+// ── Touch (CST820 capacitive on I²C) ──────────────────────────────────────────
+// JC2432W328C uses a CST820 capacitive controller, not the resistive XPT2046.
+// INT is GPIO 21, which conflicts with our TFT backlight — we poll instead.
+#define TOUCH_SDA   33
+#define TOUCH_SCL   32
+#define TOUCH_RST   25
+#define CST820_ADDR 0x15
 
 // ── UI layout ─────────────────────────────────────────────────────────────────
 #define BACK_BTN_W  44          // back button tap area width
+#define BACK_BTN_H  HEADER_H    // back button tap area height (matches header)
 
 // ── UI colours ────────────────────────────────────────────────────────────────
 #define CLR_BTN_BG    0x2104    // dark button background

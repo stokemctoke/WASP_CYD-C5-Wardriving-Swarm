@@ -9,8 +9,11 @@ extern TFT_eSPI tft;
 void drawBootMsg(const char* msg);
 void drawHeader();
 
-// Main dispatcher — called from loop() every second
+// 1Hz tick from loop() — only refreshes Home; detail screens stay static.
 void refreshDisplay();
+// Always draws whatever screen is currently on top of the UI stack.
+// Used by navigation (uiTransitionTo / uiBack) so the new screen appears.
+void drawCurrentScreen();
 // Touch dispatcher — called from handleTouch() in nest_ui
 void dispatchTap(int px, int py);
 

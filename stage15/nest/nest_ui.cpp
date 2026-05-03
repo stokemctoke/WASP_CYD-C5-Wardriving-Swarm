@@ -17,19 +17,19 @@ void uiPush(ScreenId s) {
 void uiPop() { if (uiStackDepth > 1) uiStackDepth--; }
 
 void uiFadeOut() {
-  for (int b = 255; b >= 0; b -= 15) { ledcWrite(BACKLIGHT_CH, b); delay(2); }
-  ledcWrite(BACKLIGHT_CH, 0);
+  for (int b = 255; b >= 0; b -= 15) { ledcWrite(TFT_BACKLIGHT, b); delay(2); }
+  ledcWrite(TFT_BACKLIGHT, 0);
 }
 
 void uiFadeIn() {
-  for (int b = 0; b <= 255; b += 15) { ledcWrite(BACKLIGHT_CH, b); delay(2); }
-  ledcWrite(BACKLIGHT_CH, 255);
+  for (int b = 0; b <= 255; b += 15) { ledcWrite(TFT_BACKLIGHT, b); delay(2); }
+  ledcWrite(TFT_BACKLIGHT, 255);
 }
 
 void uiTransitionTo(ScreenId s) {
   uiFadeOut();
   uiPush(s);
-  refreshDisplay();
+  drawCurrentScreen();
   uiFadeIn();
 }
 
@@ -37,7 +37,7 @@ void uiBack() {
   if (uiStackDepth <= 1) return;
   uiFadeOut();
   uiPop();
-  refreshDisplay();
+  drawCurrentScreen();
   uiFadeIn();
 }
 
@@ -53,8 +53,12 @@ void handleTouch() {
   int  px, py;
   bool isDown = touchRead(&px, &py);
   if (isDown) { lastPx = px; lastPy = py; }
-  if (isDown && !wasDown) downMs = millis();
+  if (isDown && !wasDown) {
+    downMs = millis();
+    Serial.printf("[TOUCH] down @ %d,%d  screen=%d\n", px, py, (int)uiCurrent());
+  }
   if (!isDown && wasDown && millis() - downMs >= 50) {
+    Serial.printf("[TOUCH] tap  @ %d,%d  screen=%d\n", lastPx, lastPy, (int)uiCurrent());
     dispatchTap(lastPx, lastPy);
   }
   wasDown = isDown;

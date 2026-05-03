@@ -95,9 +95,8 @@ void setup() {
   Serial.printf("[BOOT] heap=%u\n", ESP.getFreeHeap());
 
   Serial.println("[BOOT] 1/9 backlight");
-  ledcSetup(BACKLIGHT_CH, 5000, 8);
-  ledcAttachPin(TFT_BACKLIGHT, BACKLIGHT_CH);
-  ledcWrite(BACKLIGHT_CH, 255);
+  ledcAttach(TFT_BACKLIGHT, 5000, 8);
+  ledcWrite(TFT_BACKLIGHT, 255);
 
   Serial.println("[BOOT] 2/9 tft.init()");
   tft.init();
@@ -175,7 +174,7 @@ void setup() {
   Serial.println("[BOOT] 10/10 setup() complete");
   Serial.printf("[BOOT] heap=%u\n", ESP.getFreeHeap());
   tft.fillRect(0, HEADER_H, 240, 320 - HEADER_H, CLR_BG);
-  refreshDisplay();
+  drawCurrentScreen();
 }
 
 void loop() {
@@ -184,6 +183,7 @@ void loop() {
   uint32_t now = millis();
 
   handleTouch();
+  touchDiag();
 
   if (ledHeartbeatFlag) { ledHeartbeatFlag = false; nestLedFlashEvent(evNestHeartbeat); }
 
